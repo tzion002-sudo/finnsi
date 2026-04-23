@@ -1,0 +1,67 @@
+{
+  "timestamp": "2026-04-23T20:48:51+03:00",
+  "date": "2026-04-23",
+  "status": "ok",
+  "version": 1,
+  "scannedBy": "node-scanner-v2.4.1",
+  "msty": {
+    "price": 26.08,
+    "changePct": -3.4,
+    "priceSource": "Yahoo Finance",
+    "nextDividend": {
+      "amount": 0.304,
+      "exDate": "2026-04-16",
+      "payDate": "2026-04-17",
+      "status": "confirmed",
+      "source": "Yahoo Finance"
+    }
+  },
+  "mstr": {
+    "price": 172.73,
+    "changePct": -3.7,
+    "priceSource": "Yahoo Finance"
+  },
+  "ibit": {
+    "price": 43.81,
+    "changePct": -2.1,
+    "priceSource": "Yahoo Finance",
+    "currency": "USD"
+  },
+  "sp500": {
+    "price": null,
+    "changePct": null,
+    "priceSource": "unavailable",
+    "paperCode": "01183441"
+  },
+  "nasdaq": {
+    "price": null,
+    "changePct": null,
+    "priceSource": "unavailable",
+    "paperCode": "01159243"
+  },
+  "fx": {
+    "usdIls": 3.0047,
+    "changePct": 0.19,
+    "source": "Yahoo Finance"
+  },
+  "pension": {
+    "menora168": {
+      "monthlyReturn": null,
+      "ytd": null,
+      "asOf": "2026-04-23"
+    }
+  },
+  "studyFunds": {
+    "meitav13245": {
+      "monthlyReturn": null,
+      "ytd": null,
+      "asOf": "2026-04-23"
+    }
+  },
+  "news": [],
+  "warnings": [
+    "SP500 (.TA): לא נמשך מ-Yahoo Finance",
+    "Nasdaq (.TA): לא נמשך מ-Yahoo Finance",
+    "pension/studyFunds: gemelnet.co.il דורש login — השתמש ב-PDF uploader של המצפן לעדכון ידני"
+  ]
+}
