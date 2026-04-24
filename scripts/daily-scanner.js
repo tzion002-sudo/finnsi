@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Daily Scanner  –  V2.5.0
-//  Node.js standalone — ללא CORS, כותב ל-Firestore + JSON backup
+//  HaMatzpan · Daily Scanner  –  V2.5.1
+//  Node.js standalone — ללא CORS, כותב ישירות ל-Firestore בלבד
 //  הרצה: node scripts/daily-scanner.js
 //         או: run-scanner.bat
 //
-//  V2.5.0 — Historical Memory + Daily Change + Scanner Status
-//    • כותב ל-market_history/{YYYY-MM-DD} — זיכרון היסטורי
-//    • מחשב dailyChangePercent לכל נכס לעומת אתמול
-//    • מעדכן scanner_status/latest עם lastRun + status + summary
+//  V2.5.1 — Firestore-Only · postMarketPrice · Israeli ticker fallback
+//    • ❌ ללא כתיבה לקבצי JSON מקומיים — Firestore בלבד
+//    • ✅ regularMarketPrice → postMarketPrice → preMarketPrice
+//    • ✅ fallback ניירות ת"א: 1183441.TA → ^GSPC | 1159243.TA → ^IXIC
+//    • ✅ קריאת דיבידנד קודם מ-Firestore (לא מקובץ מקומי)
+//    • מכתב ל: market_data/latest · market_history/{date} · scanner_status/latest
 //
 //  ארכיטקטורה:
 //    Scanner (מקומי) → Firestore REST API → market_data/latest
@@ -18,12 +20,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import https from "https";
-import fs    from "fs";
-import path  from "path";
-import { fileURLToPath } from "url";
 
-const __dirname   = path.dirname(fileURLToPath(import.meta.url));
-const OUTPUT      = path.join(__dirname, "..", "public", "daily_scan.json");
 const TODAY       = new Date().toISOString().slice(0, 10);
 const YESTERDAY   = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
 const NOW_ISO     = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Jerusalem" }).replace(" ", "T") + "+03:00";
@@ -65,18 +62,34 @@ function httpsRequest(url, options = {}, body = null) {
   });
 }
 
-async function yahooPrice(ticker) {
+/** V2.5.1 — regularMarketPrice → postMarketPrice → preMarketPrice
+ *  fallbackTicker: אם ticker ראשי נכשל, מנסה ticker חלופי (למשל ^GSPC כ-fallback ל-1183441.TA)
+ */
+async function yahooPrice(ticker, fallbackTicker = null) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`;
   try {
     const { body } = await httpsRequest(url);
     const meta = body?.chart?.result?.[0]?.meta;
-    if (meta?.regularMarketPrice != null) {
+    // V2.5.1: שוק פתוח → regular, סגור → postMarket, טרום → preMarket
+    const raw  = meta?.regularMarketPrice ?? meta?.postMarketPrice ?? meta?.preMarketPrice;
+    if (raw != null) {
       const prev = meta.chartPreviousClose ?? meta.previousClose ?? null;
-      const cur  = parseFloat(meta.regularMarketPrice.toFixed(4));
+      const cur  = parseFloat(raw.toFixed(4));
       const chg  = prev ? parseFloat(((cur - prev) / prev * 100).toFixed(2)) : null;
-      return { price: cur, changePct: chg, currency: meta.currency || "USD", source: "Yahoo Finance" };
+      const src  = meta.regularMarketPrice != null ? "Yahoo Finance"
+                 : meta.postMarketPrice    != null ? "Yahoo Finance (post-market)"
+                 :                                   "Yahoo Finance (pre-market)";
+      return { price: cur, changePct: chg, currency: meta.currency || "USD", source: src };
     }
   } catch {}
+  // fallback: נסה ticker חלופי (לניירות ת"א שנחסמים)
+  if (fallbackTicker && fallbackTicker !== ticker) {
+    const res = await yahooPrice(fallbackTicker, null);
+    if (res.price != null) {
+      console.log(`    ↳ fallback ל-${fallbackTicker} הצליח (${ticker} חסום)`);
+      return { ...res, source: `Yahoo Finance (fallback: ${fallbackTicker})`, isFallback: true };
+    }
+  }
   return { price: null, changePct: null, currency: null, source: "unavailable" };
 }
 
@@ -268,21 +281,22 @@ function buildSummary(msty, mstr, fx, sp500) {
 // ══════════════════════════════════════════════════════════════
 (async () => {
   console.log("\n╔══════════════════════════════════════════════╗");
-  console.log("║  HaMatzpan Daily Scanner  V2.5.0            ║");
+  console.log("║  HaMatzpan Daily Scanner  V2.5.1            ║");
   console.log(`║  ${new Date().toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" })}                    ║`);
   console.log("╚══════════════════════════════════════════════╝\n");
 
   const warnings = [];
 
   // ── שלב 1: מחירים חיים ──────────────────────────────────────
+  // V2.5.1: ניירות ת"א עם fallback למדדי US במקרה חסימה
   console.log("📡 שולף מחירים מ-Yahoo Finance...");
   const [msty, mstr, ibit, fx, sp500, nasdaq] = await Promise.all([
     yahooPrice("MSTY"),
     yahooPrice("MSTR"),
     yahooPrice("IBIT"),
     yahooPrice("ILS=X"),
-    yahooPrice("1183441.TA"),
-    yahooPrice("1159243.TA"),
+    yahooPrice("1183441.TA", "^GSPC"),   // S&P 500 ת"א → fallback ל-^GSPC
+    yahooPrice("1159243.TA", "^IXIC"),   // NASDAQ ת"א  → fallback ל-^IXIC
   ]);
 
   console.log(`  MSTY   ${msty.price  != null ? `$${msty.price} (${msty.changePct >= 0 ? "+" : ""}${msty.changePct}%)` : "לא זמין"}`);
@@ -310,10 +324,11 @@ function buildSummary(msty, mstr, fx, sp500) {
       warnings.push("MSTY dividend: לא נמצא ביום חמישי — בדוק yieldmaxetfs.com/our-etfs/msty/ ידנית");
     }
   } else {
+    // V2.5.1: קרא דיבידנד אחרון מ-Firestore (לא מקובץ מקומי)
     try {
-      const prev = JSON.parse(fs.readFileSync(OUTPUT, "utf-8"));
+      const prev = await readFromFirestore("market_data", "latest");
       nextDividend = prev?.msty?.nextDividend ?? null;
-      if (nextDividend) console.log(`\n  📋 דיבידנד נשמר מסריקה קודמת: $${nextDividend.amount}`);
+      if (nextDividend) console.log(`\n  📋 דיבידנד נשמר מ-Firestore: $${nextDividend.amount}`);
     } catch {}
     if (!nextDividend) {
       nextDividend = { amount: null, exDate: null, payDate: null, status: "estimate" };
@@ -360,7 +375,7 @@ function buildSummary(msty, mstr, fx, sp500) {
     date:        TODAY,
     status:      "ok",
     version:     1,
-    scannedBy:   "node-scanner-v2.5.0",
+    scannedBy:   "node-scanner-v2.5.1",
     msty: {
       price:          msty.price,
       changePct:      msty.changePct,
@@ -435,16 +450,10 @@ function buildSummary(msty, mstr, fx, sp500) {
   });
   console.log(`  📝 סיכום: "${summary}"`);
 
-  // ── שלב 9: כתוב JSON backup (גיבוי מקומי) ───────────────────
-  try {
-    fs.writeFileSync(OUTPUT, JSON.stringify(payload, null, 2), "utf-8");
-    console.log(`\n  💾 JSON backup: ${OUTPUT}`);
-  } catch (e) {
-    console.warn("  ⚠ לא ניתן לכתוב JSON:", e.message);
-  }
+  // V2.5.1: ❌ ללא כתיבה לקבצי JSON מקומיים — Firestore הוא מקור האמת היחיד
 
   // ── סיכום ────────────────────────────────────────────────────
-  console.log("\n── סיכום V2.5.0 ─────────────────────────────────────────");
+  console.log("\n── סיכום V2.5.1 ─────────────────────────────────────────");
   console.log(`  Firestore latest:  ${fsOk ? "✅ עודכן" : "❌ נכשל (JSON בלבד)"}`);
   console.log(`  MSTY:  ${msty.price  != null ? `$${msty.price}  (יומי: ${mstyDailyChg != null ? (mstyDailyChg >= 0 ? "+" : "") + mstyDailyChg + "%" : "N/A"})` : "N/A"}`);
   console.log(`  MSTR:  ${mstr.price  != null ? `$${mstr.price}  (יומי: ${mstrDailyChg != null ? (mstrDailyChg >= 0 ? "+" : "") + mstrDailyChg + "%" : "N/A"})` : "N/A"}`);
