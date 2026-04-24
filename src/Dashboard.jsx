@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { saveAsset, subscribeToAssets, initFamily, getSettings, saveSettings, deleteAsset,
-         subscribeToMarketData, getMarketData, seedAssetsIfEmpty } from './lib/firestoreService';
+         subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
+         getScannerStatus, subscribeToScannerStatus } from './lib/firestoreService';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -16,17 +17,16 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.4.0
-//  Autonomous Agent · Long Term Redesign · Full ILS · Doughnut + Line Charts
-//  • scripts/daily-scanner.js — Node.js standalone scanner (no CORS)
-//  • ExcellenceTab V2.4.0 — Total Equity, info cards, Doughnut, Line Chart
-//  • תשואה מדויקת: (שווי נוכחי / עלות) − 1 · כל ערכים בשקלים
-//  • כלל תמר permanent note (ASSET_POLICY overlay — code-owned, survives Firestore)
-//  • Ziv "תגמולים מניות סחיר" purged (SEED + ZOMBIE cleanup)
-//  • Firestore > hardcoded USER DATA · code > Firestore for POLICY fields (notes/labels)
+//  "המצפן" – HaMatzpan V2.5.0
+//  V2.5.0 — Mobile-First · HeroSection (חדר מצב) · FamilyGoalBar · Scanner History
+//  • HeroSection: סטטוס סוכן בזמן אמת + תובנה יומית + הון נטו בולט
+//  • FamilyGoalBar: פס התקדמות ליעד משפחתי (₪ מקרן כספית)
+//  • scanner_status/latest ← subscribeToScannerStatus
+//  • scripts/daily-scanner.js V2.5.0: market_history/{date} + dailyChangePct + summary
+//  • Mobile-First: כרטיסים מעוגלים, balance text-2xl, touch targets גדולים
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.4.0";
+const APP_VERSION = "V2.5.0";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -595,7 +595,7 @@ const SourceBadge = ({ source, confirmed }) => {
 const AssetRow = ({ a, onSpotCheck }) => {
   const hasGemel = a.monthlyReturnFromGemelnet != null;
   return (
-    <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 hover:border-slate-600 transition-colors">
+    <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-4 sm:p-4 hover:border-slate-600 transition-colors shadow-sm hover:shadow-md">
       <div className="flex items-start justify-between gap-3 mb-2">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -616,7 +616,7 @@ const AssetRow = ({ a, onSpotCheck }) => {
           <p className="text-xs text-slate-400">{a.institution} {a.accountNumber ? `· ${a.accountNumber}` : ""}</p>
         </div>
         <div className="text-left flex-shrink-0">
-          <p className="text-xl font-bold text-white">{fmt(a.reportBalance)}</p>
+          <p className="text-2xl sm:text-xl font-bold text-white leading-tight">{fmt(a.reportBalance)}</p>
           <p className="text-[10px] text-slate-500">עודכן: {fmtDate(a.reportDate)}</p>
         </div>
       </div>
@@ -666,8 +666,8 @@ const AssetRow = ({ a, onSpotCheck }) => {
         <p className="text-[10px] text-slate-500">
           דמי ניהול: {a.feeFromDeposit}% מהפקדה · {a.feeFromBalance}% מצבירה
         </p>
-        <button onClick={() => onSpotCheck(a)} className="text-[11px] bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-300 px-2.5 py-1 rounded-md flex items-center gap-1">
-          <Target size={11}/> עדכון נקודתי
+        <button onClick={() => onSpotCheck(a)} className="text-xs sm:text-[11px] bg-indigo-600/20 hover:bg-indigo-600/40 active:bg-indigo-600/60 text-indigo-300 px-3 py-1.5 sm:px-2.5 sm:py-1 rounded-lg flex items-center gap-1.5 touch-manipulation">
+          <Target size={12}/> עדכון נקודתי
         </button>
       </div>
     </div>
@@ -2263,6 +2263,148 @@ const ScanToast = ({ toast, onClose }) => {
 };
 
 // ══════════════════════════════════════════════════════════════
+//  V2.5.0 — HeroSection · "חדר מצב" — סטטוס סוכן + תובנה יומית
+// ══════════════════════════════════════════════════════════════
+const HeroSection = ({ scannerStatus, liveMarket, netWorth }) => {
+  const todayStr  = new Date().toISOString().slice(0, 10);
+  const isToday   = scannerStatus?.date === todayStr;
+  const summary   = scannerStatus?.summary || null;
+
+  // תובנה חיה מ-liveMarket אם אין summary מהסוכן
+  const liveInsight = (() => {
+    if (summary) return null;
+    const parts = [];
+    const fxChg = liveMarket?.FX?.changePct;
+    const mstyChg = liveMarket?.MSTY?.changePct;
+    const mstrChg = liveMarket?.MSTR?.changePct;
+    if (fxChg  != null) parts.push(fxChg  < 0 ? `הדולר נחלש ב-${Math.abs(fxChg).toFixed(2)}%`   : `הדולר התחזק ב-${fxChg.toFixed(2)}%`);
+    if (mstyChg != null) parts.push(mstyChg >= 0 ? `MSTY עלה ב-${mstyChg.toFixed(2)}%`            : `MSTY ירד ב-${Math.abs(mstyChg).toFixed(2)}%`);
+    if (mstrChg != null) parts.push(mstrChg >= 0 ? `MSTR בעלייה ${mstrChg.toFixed(2)}%`           : `MSTR בירידה ${Math.abs(mstrChg).toFixed(2)}%`);
+    return parts.length ? parts.join(" · ") : null;
+  })();
+
+  const insight = summary || liveInsight;
+
+  return (
+    <div className="rounded-2xl bg-gradient-to-l from-slate-800/80 via-slate-900/70 to-indigo-950/60 border border-slate-700/50 p-4 mb-5 shadow-lg">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+
+        {/* ── סטטוס סוכן ── */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {isToday ? (
+            <span className="flex items-center gap-2 bg-emerald-900/40 border border-emerald-600/50 text-emerald-300 text-sm font-semibold px-3 py-1.5 rounded-full">
+              <CheckCircle2 size={14} className="text-emerald-400"/>
+              ✅ נתונים עדכניים
+            </span>
+          ) : scannerStatus ? (
+            <span className="flex items-center gap-2 bg-amber-900/30 border border-amber-600/40 text-amber-300 text-sm px-3 py-1.5 rounded-full">
+              <AlertCircle size={14} className="text-amber-400 animate-pulse"/>
+              ממתין לסריקה יומית
+            </span>
+          ) : (
+            <span className="flex items-center gap-2 bg-slate-800/60 border border-slate-600/40 text-slate-400 text-xs px-3 py-1.5 rounded-full">
+              <Activity size={12} className="animate-pulse"/>
+              טוען סטטוס...
+            </span>
+          )}
+          {isToday && scannerStatus?.lastRun && (
+            <span className="text-[10px] text-slate-500 hidden sm:inline">
+              {new Date(scannerStatus.lastRun).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
+        </div>
+
+        {/* ── תובנה יומית ── */}
+        {insight && (
+          <p className="text-sm text-slate-300 flex-1 leading-relaxed">
+            <span className="text-indigo-400 font-semibold ml-1">📊</span>
+            {insight}
+          </p>
+        )}
+
+        {/* ── הון נטו בולט (mobile: full width, desktop: right-aligned) ── */}
+        <div className="flex items-center justify-between sm:justify-end sm:flex-col sm:text-left gap-2 sm:gap-0 sm:mr-auto">
+          <span className="text-[11px] text-slate-500 sm:text-right">הון נטו משפחתי</span>
+          <span className="text-xl sm:text-2xl font-bold text-emerald-300 font-mono tracking-tight">
+            ₪{Math.round(netWorth || 0).toLocaleString("he-IL")}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════
+//  V2.5.0 — FamilyGoalBar · פס התקדמות ליעד משפחתי
+// ══════════════════════════════════════════════════════════════
+const DEFAULT_FAMILY_GOAL = { label: "טיול משפחתי לאירופה", target: 100000 };
+
+const FamilyGoalBar = ({ assets, onEditGoal, goalConfig = DEFAULT_FAMILY_GOAL }) => {
+  // מקור: נכסי money_market (נזיל, ₪ זמינים)
+  const liquidBalance = useMemo(
+    () => (assets || [])
+      .filter(a => a.category === "money_market")
+      .reduce((s, a) => s + (a.reportBalance || 0), 0),
+    [assets]
+  );
+  const pct = Math.min(100, Math.round((liquidBalance / (goalConfig.target || 1)) * 100));
+  const remaining = Math.max(0, goalConfig.target - liquidBalance);
+
+  const barColor =
+    pct >= 100 ? "from-emerald-500 to-green-400" :
+    pct >= 60  ? "from-amber-500 to-yellow-400"  :
+                 "from-indigo-500 to-purple-400";
+
+  return (
+    <div className="bg-slate-800/50 border border-slate-700/60 rounded-2xl p-4 mb-5">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-2">
+          <Target size={15} className="text-amber-400 flex-shrink-0"/>
+          <span className="text-sm font-semibold text-slate-200">יעד משפחתי</span>
+          <span className="text-sm text-slate-400">· {goalConfig.label}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`text-sm font-bold font-mono ${pct >= 100 ? "text-emerald-400" : "text-amber-300"}`}>
+            {pct}%
+          </span>
+          {onEditGoal && (
+            <button
+              onClick={onEditGoal}
+              className="text-[10px] bg-slate-700/60 hover:bg-slate-600/60 text-slate-400 hover:text-slate-200 px-2 py-1 rounded-lg transition-colors"
+            >
+              ✏️ ערוך
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div className="w-full h-3 bg-slate-700/70 rounded-full overflow-hidden">
+        <div
+          className={`h-full bg-gradient-to-r ${barColor} rounded-full transition-all duration-700 ease-out shadow-sm`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+
+      {/* מטא-מידע */}
+      <div className="flex justify-between mt-2 text-[11px]">
+        <span className="text-slate-400">
+          נצבר: <span className="font-mono text-slate-200">₪{Math.round(liquidBalance).toLocaleString("he-IL")}</span>
+          <span className="text-slate-600 mr-1">(קרן כספית)</span>
+        </span>
+        {pct < 100 ? (
+          <span className="text-slate-500">
+            נותר: <span className="font-mono text-slate-300">₪{Math.round(remaining).toLocaleString("he-IL")}</span>
+          </span>
+        ) : (
+          <span className="text-emerald-400 font-semibold">🎉 היעד הושג!</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════
 //  MorningBriefModal — V2.1.8
 //  קופץ בבוקר אם יש סריקה מתוזמנת שטרם אושרה
 //  Golden Sources: TradingView/Yahoo Finance · Investing.com/בנק ישראל · YieldMaxETFs.com בלבד
@@ -3317,6 +3459,9 @@ export default function HaMatzpanGemelnet() {
   // V2.1.9 — Cloud Sync status
   const [cloudSyncStatus, setCloudSyncStatus] = useState("idle"); // idle|syncing|synced|local|error
   const [cloudSyncAt, setCloudSyncAt]   = useState(null);
+  // V2.5.0 — Scanner Status (חדר מצב) + Family Goal
+  const [scannerStatus, setScannerStatus] = useState(null);   // { lastRun, date, status, summary }
+  const [familyGoal, setFamilyGoal]       = useState(DEFAULT_FAMILY_GOAL);
   const fileRef = useRef();
   const hydratedRef = useRef(false);
   const suppressSaveToastRef = useRef(false);
@@ -3549,6 +3694,15 @@ export default function HaMatzpanGemelnet() {
     // לא מסמן כ"אושר" — ה-brief יחזור ברענון, אלא אם תלחץ "אשר"
     setMorningBrief(null);
   };
+
+  // ═══ V2.5.0 · Scanner Status subscription ═══
+  useEffect(() => {
+    // טען מיידי
+    getScannerStatus().then(data => { if (data) setScannerStatus(data); });
+    // האזן לשינויים בזמן אמת
+    const unsub = subscribeToScannerStatus(data => { if (data) setScannerStatus(data); });
+    return () => { try { unsub?.(); } catch {} };
+  }, []);
 
   // ═══ V2.1.7 · Backup Export — ייצוא JSON מלא של כל הנתונים ═══
   const exportBackup = () => {
@@ -3929,6 +4083,13 @@ export default function HaMatzpanGemelnet() {
 
       {tab === "dashboard" && (
         <>
+          {/* V2.5.0 — חדר מצב: סטטוס סוכן + תובנה יומית */}
+          <HeroSection
+            scannerStatus={scannerStatus}
+            liveMarket={liveMarket}
+            netWorth={totals.netWorth}
+          />
+
           {/* V2.1.9 — Live Market Price Bar */}
           <LiveMarketBar
             prices={liveMarket}
@@ -3937,7 +4098,20 @@ export default function HaMatzpanGemelnet() {
             onRefresh={refreshMarket}
           />
 
-          <section className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+          {/* V2.5.0 — יעד משפחתי */}
+          <FamilyGoalBar
+            assets={assets}
+            goalConfig={familyGoal}
+            onEditGoal={() => {
+              const newLabel  = window.prompt("שם היעד:", familyGoal.label);
+              if (!newLabel) return;
+              const newTarget = parseInt(window.prompt("סכום היעד (₪):", familyGoal.target), 10);
+              if (!newTarget || isNaN(newTarget)) return;
+              setFamilyGoal({ label: newLabel, target: newTarget });
+            }}
+          />
+
+          <section className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-6">
             <StatCard
               label="הון נטו (Net Worth)"
               value={fmt(totals.netWorth)}
@@ -4140,9 +4314,8 @@ export default function HaMatzpanGemelnet() {
         <div className="flex items-start gap-2 mb-3">
           <CheckCircle2 size={14} className="text-emerald-400 flex-shrink-0 mt-0.5"/>
           <div className="flex-1">
-            <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Excellence Split</strong> (Long Term + Trade Journal) · Firestore priority · Policy overlay · Zombie-purge ·
-            Golden Sources (TradingView / Yahoo / Investing.com / YieldMaxETFs.com) · ManualLock · מחסן דוחות PDF.
-            תמיכה ב-Excel/CSV/PDF · ניהול הלוואות · מעקב חסכונות · <strong className="text-amber-300">סוכן MSTY</strong> עם היסטוריית חלוקות, כיסוי הלוואה, Break-even, ו-reverse split.
+            <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Mobile-First · חדר מצב · יעד משפחתי</strong> · Excellence Split · Firestore priority · Policy overlay ·
+            Golden Sources · ManualLock · מחסן דוחות PDF · <strong className="text-amber-300">סוכן MSTY</strong> · היסטוריה יומית · scanner_status · market_history.
             כל עריכה ידנית נשמרת מיידית ב-Firestore (finnsi-3a75d) · סריקה אוטונומית מתוזמנת ב-09:00 · {new Date().getFullYear()}.
           </div>
         </div>

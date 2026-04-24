@@ -1,5 +1,5 @@
 /**
- * firestoreService.js – Firestore CRUD + Real-time Sync  V2.4.1
+ * firestoreService.js – Firestore CRUD + Real-time Sync  V2.5.0
  * Project: finnsi-3a75d  |  Database: (default)
  *
  * כל פעולות הנתונים של המצפן — קריאה, כתיבה, מחיקה, האזנה.
@@ -31,7 +31,9 @@ const assetRef      = (id)          => doc(db, 'families', FAMILY_ID, 'assets', 
 const snapshotsCol  = ()            => collection(db, 'families', FAMILY_ID, 'snapshots');
 const snapshotRef   = (assetId, ym) => doc(db, 'families', FAMILY_ID, 'snapshots', `${assetId}_${ym}`);
 const settingsRef   = ()            => doc(db, 'families', FAMILY_ID, 'settings', 'global');
-const marketDataRef = ()            => doc(db, 'market_data', 'latest');
+const marketDataRef    = ()         => doc(db, 'market_data', 'latest');
+const scannerStatusRef = ()         => doc(db, 'scanner_status', 'latest');
+const marketHistoryRef = (date)     => doc(db, 'market_history', date);
 
 // ── LocalStorage fallback helpers ────────────────────────────────────────────
 function lsLoad(key, def) {
@@ -302,5 +304,61 @@ export async function seedAssetsIfEmpty(seedArray) {
   } catch (e) {
     console.error('seedAssetsIfEmpty:', e);
     return false;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SCANNER STATUS  (V2.5.0 — scanner health + daily summary)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * One-time fetch of scanner_status/latest (written by Node scanner).
+ * Returns { lastRun, date, status, summary, mstyPrice, mstrPrice, usdIls, ... } or null.
+ */
+export async function getScannerStatus() {
+  if (!isFirebaseReady()) return null;
+  try {
+    const snap = await getDoc(scannerStatusRef());
+    return snap.exists() ? snap.data() : null;
+  } catch (e) {
+    console.error('getScannerStatus:', e);
+    return null;
+  }
+}
+
+/**
+ * Real-time listener for scanner_status/latest.
+ * Returns an unsubscribe function.
+ */
+export function subscribeToScannerStatus(onData, onError) {
+  if (!isFirebaseReady()) return () => {};
+  return onSnapshot(
+    scannerStatusRef(),
+    snap => {
+      if (snap.exists()) onData(snap.data());
+    },
+    err => {
+      console.error('subscribeToScannerStatus:', err);
+      if (onError) onError(err);
+    }
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  MARKET HISTORY  (V2.5.0 — daily price archive)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Fetch a single day's archived market snapshot from market_history/{date}.
+ * date format: 'YYYY-MM-DD'
+ */
+export async function getMarketHistory(date) {
+  if (!isFirebaseReady() || !date) return null;
+  try {
+    const snap = await getDoc(marketHistoryRef(date));
+    return snap.exists() ? snap.data() : null;
+  } catch (e) {
+    console.error('getMarketHistory:', e);
+    return null;
   }
 }

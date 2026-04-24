@@ -1,67 +1,69 @@
 {
-  "timestamp": "2026-04-23T20:48:51+03:00",
-  "date": "2026-04-23",
+  "timestamp": "2026-04-24T09:00:00+03:00",
+  "date": "2026-04-24",
   "status": "ok",
   "version": 1,
-  "scannedBy": "node-scanner-v2.4.1",
   "msty": {
-    "price": 26.08,
-    "changePct": -3.4,
-    "priceSource": "Yahoo Finance",
+    "price": 27.52,
+    "priceSource": "Yahoo Finance / Daily Political",
     "nextDividend": {
-      "amount": 0.304,
-      "exDate": "2026-04-16",
-      "payDate": "2026-04-17",
-      "status": "confirmed",
-      "source": "Yahoo Finance"
+      "amount": 0.5211,
+      "exDate": "2026-04-23",
+      "payDate": "2026-04-24",
+      "status": "confirmed"
     }
   },
   "mstr": {
-    "price": 172.73,
-    "changePct": -3.7,
-    "priceSource": "Yahoo Finance"
-  },
-  "ibit": {
-    "price": 43.81,
-    "changePct": -2.1,
-    "priceSource": "Yahoo Finance",
-    "currency": "USD"
-  },
-  "sp500": {
-    "price": null,
-    "changePct": null,
-    "priceSource": "unavailable",
-    "paperCode": "01183441"
-  },
-  "nasdaq": {
-    "price": null,
-    "changePct": null,
-    "priceSource": "unavailable",
-    "paperCode": "01159243"
+    "price": 175.83,
+    "changePct": 9.39,
+    "priceSource": "Yahoo Finance / MarketBeat"
   },
   "fx": {
-    "usdIls": 3.0047,
-    "changePct": 0.19,
-    "source": "Yahoo Finance"
+    "usdIls": 2.968,
+    "source": "Investing.com / Trading Economics"
   },
   "pension": {
     "menora168": {
-      "monthlyReturn": null,
-      "ytd": null,
-      "asOf": "2026-04-23"
+      "monthlyReturn": 0.0,
+      "ytd": 3.12,
+      "asOf": "2026-03-31"
     }
   },
   "studyFunds": {
     "meitav13245": {
       "monthlyReturn": null,
-      "ytd": null,
-      "asOf": "2026-04-23"
+      "ytd": 5.18,
+      "asOf": "2026-03-31"
     }
   },
-  "news": [],
+  "news": [
+    {
+      "title": "MSTY Shares Gap Up on April 24, 2026",
+      "source": "Daily Political",
+      "url": "https://www.dailypolitical.com/2026/04/24/yieldmax-mstr-option-income-strategy-etf-nysearcamsty-shares-gap-up-should-you-buy.html",
+      "summary": "מניית MSTY פתחה בפער חיובי ביום שישי 24/04, עם מחיר פתיחה של $26.96 לעומת סגירה קודמת של $25.50. המניה נסחרה בהמשך ב-$27.52.",
+      "ticker": "MSTY"
+    },
+    {
+      "title": "MSTY Dividend $0.5211/Share Declared and Paid April 24, 2026",
+      "source": "DividendInvestor.com",
+      "url": "https://www.dividendinvestor.com/dividend-news/20260422/yieldmax-mstr-option-income-strategy-etf-new-tidal-etf-trust-ii-nyse-msty-declared-a-dividend-of-$0.5211-per-share/",
+      "summary": "YieldMax הכריזה ב-22 לאפריל 2026 על חלוקת דיבידנד שבועי של $0.5211 למניה עבור MSTY, עם תאריך אקס ב-23/04 ותשלום ב-24/04/2026.",
+      "ticker": "MSTY"
+    },
+    {
+      "title": "Strategy (MSTR) Surpasses BlackRock as Largest Bitcoin Holder After $2.54B Purchase",
+      "source": "247 Wall St. / CoinDesk",
+      "url": "https://247wallst.com/investing/2026/04/21/bitcoin-news-strategy-just-passed-blackrock-as-the-largest-bitcoin-holder-in-the-world/",
+      "summary": "Strategy (לשעבר MicroStrategy) רכשה 34,164 ביטקוין ב-$2.54 מיליארד בשבוע שעבר, והפכה לבעלת הביטקוין הגדולה בעולם עם 815,061 BTC – עוקפת את קרן iShares Bitcoin Trust של BlackRock.",
+      "ticker": "MSTR"
+    }
+  ],
   "warnings": [
-    "SP500 (.TA): לא נמשך מ-Yahoo Finance",
-    "Nasdaq (.TA): לא נמשך מ-Yahoo Finance",
-    "pension/studyFunds: gemelnet.co.il דורש login — השתמש ב-PDF uploader של המצפן לעדכון ידני"
+    "MSTR price data was inconsistent across sources: 'current price $172.47' vs today's stated range $175.20–$178.48, opening $175.83. Used opening price $175.83 as reported value.",
+    "Menora track 168 March monthly return derived as ~0.00% from cumulative data (Jan 2.31% + Feb 0.79% = YTD 3.12% through March). Official March figure not explicitly confirmed.",
+    "Meitav 13245 monthly return for March not available — only YTD 5.18% through Q1 2026 was found.",
+    "USD/ILS rate 2.968 based on mid-session quotes; official Bank of Israel rate may differ slightly.",
+    "MSTY dividend $0.5211 confirmed from DividendInvestor.com citing official YieldMax announcement dated 2026-04-22. Pay-date is today (2026-04-24)."
   ]
 }
