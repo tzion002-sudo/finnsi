@@ -16,16 +16,16 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.5.1
-//  V2.5.1 — Stale-Price display · Israeli ticker fallback · postMarketPrice · UI cleanup
-//  • "חסום" → מחיר אחרון ידוע + אייקון 🕐 (stale data מ-lastScan/Firestore)
-//  • LIVE_TRACKS: SP500/NASDAQ fallback ל-^GSPC/^IXIC כשה-.TA חסום
-//  • fetchYahooPrice: regularMarketPrice → postMarketPrice → preMarketPrice fallback
-//  • הוסרו: HeroSection (טוען סטאטוס) + FamilyGoalBar (יעד משפחתי)
-//  • Scanner V2.5.1: ללא כתיבת JSON מקומי, קריאת דיבידנד מ-Firestore
+//  "המצפן" – HaMatzpan V2.5.2
+//  V2.5.2 — Zero LocalStorage · Firestore-Only · Precision Focus · FX conversion for Israeli papers
+//  • מחיקת כל lsSave — כל הנתונים זורמים דרך subscribeToAssets → Firestore בלבד
+//  • assets init: SEED ישיר (לא lsLoad) — מניעת Stale state בין מכשירים
+//  • useLiveMarket: FX-conversion אוטומטית ל-SP500/NASDAQ אחרי fallback ל-^GSPC/^IXIC
+//  • LIVE_TRACKS: תוויות מדויקות לניירות האקסלנס הישראליים
+//  • Scanner V2.5.2: Firestore-Only, 5 נכסי Precision Focus, RSS news, projected dividend
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.5.1";
+const APP_VERSION = "V2.5.2";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2536,8 +2536,8 @@ const CompoundProjection = ({ asset }) => {
 const LIVE_TRACKS = [
   { id:"IBIT",   ticker:"IBIT",       label:"Bitcoin ETF (IBIT)", currency:"USD", flag:"₿" },
   { id:"MSTY",   ticker:"MSTY",       label:"MSTY",               currency:"USD", flag:"📈" },
-  { id:"SP500",  ticker:"1183441.TA", fallback:"^GSPC",           label:"S&P 500",          currency:"ILS", flag:"🇺🇸" },
-  { id:"NASDAQ", ticker:"1159243.TA", fallback:"^IXIC",           label:"נאסד\"ק",           currency:"ILS", flag:"💻" },
+  { id:"SP500",  ticker:"1183441.TA", fallback:"^GSPC",           label:"אקסלנס S&P 500 (1183441)",  currency:"ILS", flag:"🇺🇸" },
+  { id:"NASDAQ", ticker:"1159243.TA", fallback:"^IXIC",           label:"אקסלנס נאסד\"ק (1159243)",   currency:"ILS", flag:"💻" },
   { id:"FX",     ticker:"ILS=X",      label:"USD/ILS",            currency:"FX",  flag:"💱" },
 ];
 
@@ -2601,6 +2601,19 @@ function useLiveMarket() {
         results[t.id] = { price, source, currency: currency || t.currency, label: t.label, flag: t.flag, ticker: t.ticker, isFallback: !!isFallback };
       })
     );
+    // V2.5.2 — FX conversion: Israeli papers fallback to USD (^GSPC/^IXIC) → multiply by USD/ILS to get ILS price
+    const fxRate = results.FX?.price;
+    for (const id of ["SP500", "NASDAQ"]) {
+      const r = results[id];
+      if (r?.isFallback && r.price != null && r.currency !== "ILS" && fxRate) {
+        results[id] = {
+          ...r,
+          price: parseFloat((r.price * fxRate).toFixed(2)),
+          currency: "ILS",
+          source: `${r.source} × FX₪`,
+        };
+      }
+    }
     setPrices(results);
     setFetchedAt(new Date().toISOString());
     setFetching(false);
@@ -3330,7 +3343,8 @@ const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, l
 export default function HaMatzpanGemelnet() {
   // ═══ V2.1.5 · State עם טעינת localStorage ═══
   // V2.2.1 — apply ASSET_POLICY on initial load so policy fields (permanentNote) exist from boot
-  const [assets, setAssets]               = useState(() => applyAssetPolicy(lsLoad("assets", SEED)));
+  // V2.5.2 — Zero LocalStorage: assets init מ-SEED ישיר; הנתון האמיתי יגיע מ-subscribeToAssets
+  const [assets, setAssets]               = useState(() => applyAssetPolicy(SEED));
   const [loans, setLoans]                 = useState(() => lsLoad("loans", DEFAULT_LOANS));
   const [savings, setSavings]             = useState(() => lsLoad("savings", DEFAULT_SAVINGS));
   const [mstyDividends, setMstyDividends] = useState(() => lsLoad("msty_dividends", MSTY_DIVIDENDS_SEED));
@@ -3364,11 +3378,11 @@ export default function HaMatzpanGemelnet() {
   const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, refresh: refreshMarket } = useLiveMarket();
 
   // V2.1.9 — עדכון אוטומטי של מחיר MSTY + שער USD/ILS מ-LiveMarket (אם אין _manualLock)
+  // V2.5.2 — Firestore-Only: עדכון מחיר MSTY + FX ב-state בלבד (ללא lsSave)
   useEffect(() => {
     if (!liveMarket.MSTY?.price) return;
     setMstyPrice(prev => {
       if (Math.abs(liveMarket.MSTY.price - prev) > 0.01) {
-        lsSave("msty_price", liveMarket.MSTY.price);
         return liveMarket.MSTY.price;
       }
       return prev;
@@ -3379,7 +3393,6 @@ export default function HaMatzpanGemelnet() {
     if (!liveMarket.FX?.price) return;
     setMstyFX(prev => {
       if (Math.abs(liveMarket.FX.price - prev) > 0.001) {
-        lsSave("msty_fx", liveMarket.FX.price);
         return liveMarket.FX.price;
       }
       return prev;
@@ -3402,8 +3415,8 @@ export default function HaMatzpanGemelnet() {
                 : ca
               );
               // V2.2.1 — apply code-owned policy overlay on top of Firestore data
+              // V2.5.2 — Firestore-Only: אין כתיבה ל-localStorage
               const merged = applyAssetPolicy(rawMerged);
-              lsSave("assets", merged);
               return merged;
             });
             setCloudSyncStatus("synced");
@@ -3428,17 +3441,10 @@ export default function HaMatzpanGemelnet() {
     return () => { try { unsub?.(); } catch {} };
   }, []); // רק ב-mount
 
-  // ═══ Persistence — שומר ל-localStorage בכל שינוי ═══
-  useEffect(() => { lsSave("assets",         assets);        }, [assets]);
-  useEffect(() => { lsSave("loans",          loans);         }, [loans]);
-  useEffect(() => { lsSave("savings",        savings);       }, [savings]);
-  useEffect(() => { lsSave("msty_dividends", mstyDividends); }, [mstyDividends]);
-  useEffect(() => { lsSave("msty_fx",        mstyFX);        }, [mstyFX]);
-  useEffect(() => { lsSave("msty_price",     mstyPrice);     }, [mstyPrice]);
-  useEffect(() => { lsSave("last_scan",      lastScan);      }, [lastScan]);
-  useEffect(() => { lsSave("documents",      documents);     }, [documents]);
-  useEffect(() => { lsSave("excellence_long",  excellenceLongTerm);     }, [excellenceLongTerm]);
-  useEffect(() => { lsSave("excellence_trade", excellenceTradeJournal); }, [excellenceTradeJournal]);
+  // V2.5.2 — Persistence: הוסרה כתיבת localStorage לחלוטין.
+  // • assets ← Firestore via subscribeToAssets (real-time)
+  // • Excellence ← Firestore via saveSettings (debounced, 400ms)
+  // • mstyPrice / mstyFX ← LiveMarket hook (in-memory only)
 
   // ═══ V2.2.0 · Firestore sync for Excellence settings ═══
   // Load once on mount; save (debounced) on every change. DB > hardcoded.
@@ -3624,13 +3630,14 @@ export default function HaMatzpanGemelnet() {
         const payload = JSON.parse(ev.target.result);
         if (!payload?.data) throw new Error("מבנה קובץ שגוי — חסר שדה data");
         const d = payload.data;
-        if (d.assets?.length)            { setAssets(d.assets);            lsSave("assets", d.assets); }
-        if (d.loans?.length)             { setLoans(d.loans);              lsSave("loans", d.loans); }
-        if (d.savings?.length)           { setSavings(d.savings);          lsSave("savings", d.savings); }
-        if (d.mstyDividends?.length)     { setMstyDividends(d.mstyDividends); lsSave("msty_dividends", d.mstyDividends); }
-        if (d.mstyPrice != null)         { setMstyPrice(d.mstyPrice);      lsSave("msty_price", d.mstyPrice); }
-        if (d.mstyFX != null)            { setMstyFX(d.mstyFX);           lsSave("msty_fx", d.mstyFX); }
-        if (d.lastScan != null)          { setLastScan(d.lastScan);        lsSave("last_scan", d.lastScan); }
+        // V2.5.2 — Firestore-Only: state בלבד (ללא lsSave)
+        if (d.assets?.length)            { setAssets(d.assets); }
+        if (d.loans?.length)             { setLoans(d.loans); }
+        if (d.savings?.length)           { setSavings(d.savings); }
+        if (d.mstyDividends?.length)     { setMstyDividends(d.mstyDividends); }
+        if (d.mstyPrice != null)         { setMstyPrice(d.mstyPrice); }
+        if (d.mstyFX != null)            { setMstyFX(d.mstyFX); }
+        if (d.lastScan != null)          { setLastScan(d.lastScan); }
         setSaveToast(`✅ גיבוי שוחזר בהצלחה מ-${payload.exportedAt?.slice(0,10) || "קובץ"}`);
       } catch (err) {
         setSaveToast(`❌ שגיאה בייבוא: ${err.message}`);
@@ -4180,7 +4187,7 @@ export default function HaMatzpanGemelnet() {
         <div className="flex items-start gap-2 mb-3">
           <CheckCircle2 size={14} className="text-emerald-400 flex-shrink-0 mt-0.5"/>
           <div className="flex-1">
-            <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Stale-Price 🕐 · Israeli Fallback · postMarket</strong> · Excellence Split · Firestore priority · Policy overlay ·
+            <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Zero LocalStorage · Firestore-Only · FX Conversion · Precision Focus</strong> · Excellence Split · Firestore priority · Policy overlay ·
             Golden Sources · ManualLock · מחסן דוחות PDF · <strong className="text-amber-300">סוכן MSTY</strong> · היסטוריה יומית · market_history.
             כל עריכה ידנית נשמרת מיידית ב-Firestore (finnsi-3a75d) · סריקה אוטונומית מתוזמנת ב-09:00 · {new Date().getFullYear()}.
           </div>
