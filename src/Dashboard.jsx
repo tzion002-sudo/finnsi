@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { saveAsset, subscribeToAssets, initFamily, getSettings, saveSettings, deleteAsset,
-         subscribeToMarketData, getMarketData, seedAssetsIfEmpty } from './lib/firestoreService';
+         subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
+         subscribeToSettings } from './lib/firestoreService';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -16,16 +17,17 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.5.2
-//  V2.5.2 — Zero LocalStorage · Firestore-Only · Precision Focus · FX conversion for Israeli papers
-//  • מחיקת כל lsSave — כל הנתונים זורמים דרך subscribeToAssets → Firestore בלבד
-//  • assets init: SEED ישיר (לא lsLoad) — מניעת Stale state בין מכשירים
-//  • useLiveMarket: FX-conversion אוטומטית ל-SP500/NASDAQ אחרי fallback ל-^GSPC/^IXIC
-//  • LIVE_TRACKS: תוויות מדויקות לניירות האקסלנס הישראליים
-//  • Scanner V2.5.2: Firestore-Only, 5 נכסי Precision Focus, RSS news, projected dividend
+//  "המצפן" – HaMatzpan V2.6.0
+//  V2.6.0 — Phone↔Computer Sync · Manual Save Button · Autonomous Scanner
+//  • תיקון קריטי: loans/savings/mstyDividends/documents/mstyPrice/mstyFX
+//    זורמים עכשיו דרך subscribeToSettings → Firestore (היה localStorage בלבד)
+//  • כפתור "💾 שמור הכל" בהדר עם טוסט "נשמר ל-cloud בשעה HH:MM"
+//  • debounced save (600ms) על כל שינוי + force-save ידני ב-onClick
+//  • סקנר מתוזמן רץ ב-08:00 כל בוקר ב-Cowork (mcp scheduled-tasks)
+//  V2.5.2 — Zero LocalStorage · Firestore-Only · Precision Focus · FX conversion
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.5.2";
+const APP_VERSION = "V2.6.0";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -3345,12 +3347,13 @@ export default function HaMatzpanGemelnet() {
   // V2.2.1 — apply ASSET_POLICY on initial load so policy fields (permanentNote) exist from boot
   // V2.5.2 — Zero LocalStorage: assets init מ-SEED ישיר; הנתון האמיתי יגיע מ-subscribeToAssets
   const [assets, setAssets]               = useState(() => applyAssetPolicy(SEED));
-  const [loans, setLoans]                 = useState(() => lsLoad("loans", DEFAULT_LOANS));
-  const [savings, setSavings]             = useState(() => lsLoad("savings", DEFAULT_SAVINGS));
-  const [mstyDividends, setMstyDividends] = useState(() => lsLoad("msty_dividends", MSTY_DIVIDENDS_SEED));
-  const [mstyFX, setMstyFX]               = useState(() => lsLoad("msty_fx", MSTY_DEFAULTS.currentFX));
-  const [mstyPrice, setMstyPrice]         = useState(() => lsLoad("msty_price", MSTY_DEFAULTS.currentPrice));
-  const [lastScan, setLastScan]           = useState(() => lsLoad("last_scan", null));
+  // V2.6.0 — Cloud-synced state (היה localStorage בלבד, גורם הסנכרון השבור)
+  const [loans, setLoans]                 = useState(DEFAULT_LOANS);
+  const [savings, setSavings]             = useState(DEFAULT_SAVINGS);
+  const [mstyDividends, setMstyDividends] = useState(MSTY_DIVIDENDS_SEED);
+  const [mstyFX, setMstyFX]               = useState(MSTY_DEFAULTS.currentFX);
+  const [mstyPrice, setMstyPrice]         = useState(MSTY_DEFAULTS.currentPrice);
+  const [lastScan, setLastScan]           = useState(null);
   const [spotAsset, setSpotAsset]     = useState(null);
   const [uploadResult, setUploadResult] = useState(null);
   const [lastSyncDate, setLastSyncDate] = useState(null);
@@ -3362,10 +3365,12 @@ export default function HaMatzpanGemelnet() {
   const [morningBrief, setMorningBrief] = useState(null); // daily_scan.json shape
   const [saveToast, setSaveToast]       = useState(null);
   const [missedScanBanner, setMissedScanBanner] = useState(false);
-  const [documents, setDocuments]       = useState(() => lsLoad("documents", []));
+  const [documents, setDocuments]       = useState([]);
   // V2.2.0 — Excellence sub-portfolios
-  const [excellenceLongTerm, setExcellenceLongTerm] = useState(() => lsLoad("excellence_long", DEFAULT_EXCELLENCE_LONG));
-  const [excellenceTradeJournal, setExcellenceTradeJournal] = useState(() => lsLoad("excellence_trade", DEFAULT_TRADE_JOURNAL));
+  const [excellenceLongTerm, setExcellenceLongTerm] = useState(DEFAULT_EXCELLENCE_LONG);
+  const [excellenceTradeJournal, setExcellenceTradeJournal] = useState(DEFAULT_TRADE_JOURNAL);
+  // V2.6.0 — Manual save toast
+  const [manualSaveStatus, setManualSaveStatus] = useState("idle"); // idle|saving|saved|error
   // V2.1.9 — Cloud Sync status
   const [cloudSyncStatus, setCloudSyncStatus] = useState("idle"); // idle|syncing|synced|local|error
   const [cloudSyncAt, setCloudSyncAt]   = useState(null);
@@ -3446,40 +3451,81 @@ export default function HaMatzpanGemelnet() {
   // • Excellence ← Firestore via saveSettings (debounced, 400ms)
   // • mstyPrice / mstyFX ← LiveMarket hook (in-memory only)
 
-  // ═══ V2.2.0 · Firestore sync for Excellence settings ═══
-  // Load once on mount; save (debounced) on every change. DB > hardcoded.
+  // ═══ V2.6.0 · Firestore real-time sync for ALL family-wide settings ═══
+  // (loans, savings, dividends, mstyPrice, mstyFX, documents, excellence)
+  // השינוי הזה תיקן את הבאג הקריטי של "שמירה בטלפון לא מגיעה למחשב"
   const settingsHydratedRef = useRef(false);
+  const cloudUpdateRef     = useRef(false); // V2.6.0: מסמן שינוי שמגיע מ-onSnapshot כדי לדכא auto-save חוזר
   useEffect(() => {
-    (async () => {
-      try {
-        const s = await getSettings();
-        if (s?.excellenceLongTerm && Array.isArray(s.excellenceLongTerm)) {
-          setExcellenceLongTerm(s.excellenceLongTerm);
-        }
-        if (s?.excellenceTradeJournal && Array.isArray(s.excellenceTradeJournal)) {
-          setExcellenceTradeJournal(s.excellenceTradeJournal);
-        }
-      } catch (err) {
-        console.warn("getSettings failed, using localStorage values:", err);
-      } finally {
+    const unsub = subscribeToSettings(
+      (s) => {
+        if (!s) return;
+        // העדכון מגיע מ-cloud (לא עריכה ידנית) — דכא את ה-save-toast והאוטו-שמירה
+        suppressSaveToastRef.current = true;
+        cloudUpdateRef.current = true;
+        if (Array.isArray(s.loans))                  setLoans(s.loans);
+        if (Array.isArray(s.savings))                setSavings(s.savings);
+        if (Array.isArray(s.mstyDividends))          setMstyDividends(s.mstyDividends);
+        if (Array.isArray(s.documents))              setDocuments(s.documents);
+        if (typeof s.mstyPrice === "number")         setMstyPrice(s.mstyPrice);
+        if (typeof s.mstyFX === "number")            setMstyFX(s.mstyFX);
+        if (Array.isArray(s.excellenceLongTerm))     setExcellenceLongTerm(s.excellenceLongTerm);
+        if (Array.isArray(s.excellenceTradeJournal)) setExcellenceTradeJournal(s.excellenceTradeJournal);
         settingsHydratedRef.current = true;
-      }
-    })();
+      },
+      (err) => console.warn("subscribeToSettings failed:", err)
+    );
+    // Failsafe: if no settings doc exists at all, mark hydrated after 2s so writes can begin
+    const tFallback = setTimeout(() => { settingsHydratedRef.current = true; }, 2000);
+    return () => { try { unsub?.(); } catch {} clearTimeout(tFallback); };
   }, []);
-  useEffect(() => {
-    if (!settingsHydratedRef.current) return; // avoid writing defaults before load
-    const t = setTimeout(() => {
-      saveSettings({ excellenceLongTerm }).catch(err => console.warn("saveSettings(LT) failed:", err));
-    }, 400);
-    return () => clearTimeout(t);
-  }, [excellenceLongTerm]);
+
+  // Debounced auto-save: כל שינוי במצבים האלה נשמר ב-Firestore אחרי 600ms.
+  // settingsHydratedRef מבטיח שלא נדרוס נתוני cloud עם defaults לפני שטענו.
+  // cloudUpdateRef מונע לולאת echo: שינוי שמגיע מ-onSnapshot לא ייכתב חזרה.
   useEffect(() => {
     if (!settingsHydratedRef.current) return;
+    if (cloudUpdateRef.current) {
+      cloudUpdateRef.current = false;
+      return;
+    }
     const t = setTimeout(() => {
-      saveSettings({ excellenceTradeJournal }).catch(err => console.warn("saveSettings(TJ) failed:", err));
-    }, 400);
+      saveSettings({
+        loans, savings, mstyDividends, documents,
+        mstyPrice, mstyFX,
+        excellenceLongTerm, excellenceTradeJournal,
+      }).catch(err => console.warn("auto-saveSettings failed:", err));
+    }, 600);
     return () => clearTimeout(t);
-  }, [excellenceTradeJournal]);
+  }, [loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal]);
+
+  // ═══ V2.6.0 · Manual "Save All" — מאלץ כתיבה מיידית של כל המצב ל-Firestore ═══
+  const handleManualSaveAll = useCallback(async () => {
+    setManualSaveStatus("saving");
+    try {
+      // 1) Settings doc — loans/savings/dividends/dynamic prices
+      await saveSettings({
+        loans, savings, mstyDividends, documents,
+        mstyPrice, mstyFX,
+        excellenceLongTerm, excellenceTradeJournal,
+      });
+      // 2) Assets — כל נכס נכתב ב-saveAsset (setDoc+merge, idempotent)
+      await Promise.allSettled(assets.map(a => saveAsset(a)));
+      const now = new Date();
+      const hh  = String(now.getHours()).padStart(2, "0");
+      const mm  = String(now.getMinutes()).padStart(2, "0");
+      setManualSaveStatus("saved");
+      setSaveToast(`💾 נשמר ל-cloud בשעה ${hh}:${mm}`);
+      setCloudSyncStatus("synced");
+      setCloudSyncAt(now.toISOString());
+      setTimeout(() => setManualSaveStatus("idle"), 2500);
+    } catch (err) {
+      console.error("Manual save failed:", err);
+      setManualSaveStatus("error");
+      setSaveToast("❌ שמירה נכשלה — בדוק חיבור Firestore");
+      setTimeout(() => setManualSaveStatus("idle"), 3500);
+    }
+  }, [loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, assets]);
 
   // ═══ V2.2.0 · Zombie asset cleanup (defensive: Firestore leftovers) ═══
   // Purges rows matching ZOMBIE_ASSETS (e.g. Ziv "תגמולים מניות סחיר") — one-shot per session.
@@ -3870,6 +3916,27 @@ export default function HaMatzpanGemelnet() {
           <p className="text-slate-400 text-sm mt-1">דשבורד ניהול הון משפחתי · גמל-נט · הלוואות · חסכונות</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* V2.6.0 — Manual Save All button (visible feedback for phone↔computer sync) */}
+          <button
+            onClick={handleManualSaveAll}
+            disabled={manualSaveStatus === "saving"}
+            title="כתיבה מיידית של כל המצב ל-Firestore (assets + loans + savings + dividends)"
+            className={`flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-full border shadow-md transition-all ${
+              manualSaveStatus === "saved"   ? "bg-emerald-600 border-emerald-400 text-white shadow-emerald-500/40 scale-105" :
+              manualSaveStatus === "saving"  ? "bg-cyan-700 border-cyan-500 text-cyan-100 cursor-wait" :
+              manualSaveStatus === "error"   ? "bg-rose-700 border-rose-500 text-white" :
+                                               "bg-gradient-to-r from-emerald-600 to-teal-600 border-emerald-400/60 text-white hover:from-emerald-500 hover:to-teal-500 shadow-emerald-500/30"
+            }`}
+          >
+            {manualSaveStatus === "saving" ? <Activity size={13} className="animate-spin"/> :
+             manualSaveStatus === "saved"  ? <CheckCircle2 size={13}/> :
+             manualSaveStatus === "error"  ? <AlertCircle size={13}/> :
+                                             <Save size={13}/>}
+            {manualSaveStatus === "saving" ? "שומר..." :
+             manualSaveStatus === "saved"  ? "נשמר ✅" :
+             manualSaveStatus === "error"  ? "נכשל ❌" :
+                                             "💾 שמור הכל"}
+          </button>
           <SmartScanButton
             currentPrice={mstyPrice}
             currentFX={mstyFX}
@@ -4187,7 +4254,7 @@ export default function HaMatzpanGemelnet() {
         <div className="flex items-start gap-2 mb-3">
           <CheckCircle2 size={14} className="text-emerald-400 flex-shrink-0 mt-0.5"/>
           <div className="flex-1">
-            <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Zero LocalStorage · Firestore-Only · FX Conversion · Precision Focus</strong> · Excellence Split · Firestore priority · Policy overlay ·
+            <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Phone↔Computer Sync · Manual 💾 Save · Autonomous Morning Scan</strong> · Loans/Savings/Dividends now cloud-synced · Excellence Split · Firestore priority ·
             Golden Sources · ManualLock · מחסן דוחות PDF · <strong className="text-amber-300">סוכן MSTY</strong> · היסטוריה יומית · market_history.
             כל עריכה ידנית נשמרת מיידית ב-Firestore (finnsi-3a75d) · סריקה אוטונומית מתוזמנת ב-09:00 · {new Date().getFullYear()}.
           </div>

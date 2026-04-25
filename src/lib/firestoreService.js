@@ -197,6 +197,30 @@ export async function saveSettings(settings) {
   await setDoc(settingsRef(), { ...settings, updatedAt: serverTimestamp() }, { merge: true });
 }
 
+/**
+ * V2.6.0 — Real-time listener for /families/mizrahi/settings/global.
+ * Used to sync loans, savings, mstyDividends, documents, mstyPrice, mstyFX
+ * between phone and computer.
+ * Returns an unsubscribe function.
+ */
+export function subscribeToSettings(onSettings, onError) {
+  if (!isFirebaseReady()) {
+    const cached = lsLoad('compass_settings', null);
+    if (cached) onSettings(cached);
+    return () => {};
+  }
+  return onSnapshot(
+    settingsRef(),
+    snap => {
+      if (snap.exists()) onSettings(snap.data());
+    },
+    err => {
+      console.error('subscribeToSettings:', err);
+      if (onError) onError(err);
+    }
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  MIGRATION
 // ════════════════════════════════════════════════════════════════════════════
