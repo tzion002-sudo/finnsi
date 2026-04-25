@@ -17,7 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.6.1
+//  "המצפן" – HaMatzpan V2.6.2
+//  V2.6.2 — Save Fix: ignoreUndefinedProperties · 25s timeout · Firebase error codes
 //  V2.6.1 — Firestore-First Live Market · Save Timeout · Dividend Backfill
 //  • useLiveMarket עובר ל-Firestore-first (Yahoo CORS חסום מהדפדפן)
 //  • subscribeToMarketData מזין live prices ב-real-time
@@ -26,7 +27,7 @@ import {
 //  V2.6.0 — Phone↔Computer Sync · Manual Save Button · Autonomous Scanner
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.6.1";
+const APP_VERSION = "V2.6.2";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -3546,11 +3547,11 @@ export default function HaMatzpanGemelnet() {
   // המשתמש מקבל פידבק ברור במקום ספינר אינסופי.
   const handleManualSaveAll = useCallback(async () => {
     setManualSaveStatus("saving");
-    const SAVE_TIMEOUT_MS = 10000;
+    const SAVE_TIMEOUT_MS = 25000;
     const withTimeout = (promise, label) =>
       Promise.race([
         promise,
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout (${label})`)), SAVE_TIMEOUT_MS)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout (${label}) — בדוק חיבור אינטרנט`)), SAVE_TIMEOUT_MS)),
       ]);
 
     if (!isFirebaseReady()) {
@@ -3595,9 +3596,15 @@ export default function HaMatzpanGemelnet() {
     } catch (err) {
       console.error("Manual save failed:", err);
       setManualSaveStatus("error");
-      const msg = err?.message || "שגיאה לא ידועה";
-      setSaveToast(`❌ שמירה נכשלה: ${msg}`);
-      setTimeout(() => setManualSaveStatus("idle"), 5000);
+      const code = err?.code ? ` [${err.code}]` : "";
+      const msg  = err?.message || "שגיאה לא ידועה";
+      // הוראה לפי קוד Firebase
+      let hint = "";
+      if (err?.code === "permission-denied")  hint = " — הרשאות Firestore פגו, כנס ל-Firebase Console";
+      if (err?.code === "unavailable")        hint = " — Firestore לא זמין, נסה שוב";
+      if (err?.code === "resource-exhausted") hint = " — מכסת Firestore הגיעה לגבול";
+      setSaveToast(`❌ שמירה נכשלה${code}: ${msg}${hint}`);
+      setTimeout(() => setManualSaveStatus("idle"), 7000);
     }
   }, [loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, assets]);
 

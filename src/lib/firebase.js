@@ -12,7 +12,7 @@
  */
 
 import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { initializeFirestore, CACHE_SIZE_UNLIMITED } from 'firebase/firestore';
 
 // ─── Firebase Config — פרויקט finnsi-3a75d ────────────────────
 const firebaseConfig = {
@@ -35,7 +35,9 @@ let db  = null;
 if (CONFIG_FILLED) {
   try {
     app = initializeApp(firebaseConfig);
-    db  = getFirestore(app);
+    db  = initializeFirestore(app, {
+      ignoreUndefinedProperties: true,   // מונע שגיאות כאשר שדות undefined נשלחים ל-Firestore
+    });
     console.log('✅ Firebase connected:', firebaseConfig.projectId);
   } catch (e) {
     console.error('❌ Firebase init failed:', e.message);
