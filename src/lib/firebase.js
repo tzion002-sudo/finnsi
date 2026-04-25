@@ -36,7 +36,9 @@ if (CONFIG_FILLED) {
   try {
     app = initializeApp(firebaseConfig);
     db  = initializeFirestore(app, {
-      ignoreUndefinedProperties: true,   // מונע שגיאות כאשר שדות undefined נשלחים ל-Firestore
+      ignoreUndefinedProperties:       true,  // מונע שגיאות כאשר שדות undefined נשלחים ל-Firestore
+      experimentalForceLongPolling:    true,  // כופה HTTP long-polling במקום WebSocket — עוקף חסימות router/firewall
+      experimentalAutoDetectLongPolling: false,
     });
     console.log('✅ Firebase connected:', firebaseConfig.projectId);
   } catch (e) {

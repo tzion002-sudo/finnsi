@@ -17,7 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.6.2
+//  "המצפן" – HaMatzpan V2.6.3
+//  V2.6.3 — Firestore Connection Fix: forceLongPolling + Firestore always wins merge
 //  V2.6.2 — Save Fix: ignoreUndefinedProperties · 25s timeout · Firebase error codes
 //  V2.6.1 — Firestore-First Live Market · Save Timeout · Dividend Backfill
 //  • useLiveMarket עובר ל-Firestore-first (Yahoo CORS חסום מהדפדפן)
@@ -27,7 +28,7 @@ import {
 //  V2.6.0 — Phone↔Computer Sync · Manual Save Button · Autonomous Scanner
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.6.2";
+const APP_VERSION = "V2.6.3";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2619,11 +2620,12 @@ function useLiveMarket() {
     const unsub = subscribeToMarketData((md) => {
       const mapped = fromFirestore(md);
       if (!mapped) return;
-      // מיזוג: שמור על מחירים שהגיעו מ-Yahoo אם הם טריים יותר
+      // V2.6.3: Firestore הוא מקור האמת — תמיד מנצח. Yahoo (browser) לא אמין בגלל CORS.
+      // אם Yahoo הצליח להביא ערך לא-null, הוא כבר נכתב ישירות ל-setPrices() בנפרד.
       setPrices(prev => {
         const merged = { ...prev };
         for (const [k, v] of Object.entries(mapped)) {
-          if (v && (!prev[k]?.price || prev[k]?._stale)) merged[k] = v;
+          if (v != null) merged[k] = v;  // Firestore תמיד דורס — הסקנר הוא הפקיד
         }
         return merged;
       });
