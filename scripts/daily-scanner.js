@@ -80,18 +80,24 @@ async function yahooPrice(ticker, fallbackTicker = null) {
   return { price: null, changePct: null, currency: null, source: "unavailable", isFallback: false };
 }
 
-// ── Yahoo Finance — dividend ──────────────────────────────────
+// ── Yahoo Finance — dividend (V2.6.1: כל 3 חודשים אחרונים) ─────
 async function yahooDividend(ticker) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1mo&events=div`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=3mo&events=div`;
   try {
     const { body } = await httpsRequest(url);
     const divs = body?.chart?.result?.[0]?.events?.dividends;
     if (divs) {
-      const latest = Object.values(divs).sort((a, b) => b.date - a.date)[0];
+      const sorted = Object.values(divs).sort((a, b) => b.date - a.date);
+      const all = sorted.map(d => ({
+        amount:  +d.amount.toFixed(4),
+        exDate:  new Date(d.date * 1000).toISOString().slice(0, 10),
+        payDate: new Date((d.date + 86400) * 1000).toISOString().slice(0, 10),
+        status:  "confirmed",
+        source:  "Yahoo Finance",
+      }));
+      const latest = all[0];
       if (latest) {
-        const exDate  = new Date(latest.date * 1000).toISOString().slice(0, 10);
-        const payDate = new Date((latest.date + 86400) * 1000).toISOString().slice(0, 10);
-        return { amount: +latest.amount.toFixed(4), exDate, payDate, status: "confirmed", source: "Yahoo Finance" };
+        return { ...latest, recent: all }; // V2.6.1: כולל היסטוריית 3 חודשים
       }
     }
   } catch {}
@@ -247,22 +253,24 @@ function buildSummary(msty, mstr, fx, sp500) {
   if (!sp500.price)  warnings.push("נייר 1183441 (S&P500 אקסלנס): חסום" + (sp500.isFallback ? " → נעשה שימוש ב-^GSPC×FX" : ""));
   if (!nasdaq.price) warnings.push("נייר 1159243 (נאסד\"ק אקסלנס): חסום" + (nasdaq.isFallback ? " → נעשה שימוש ב-^IXIC×FX" : ""));
 
-  // ══ שלב 3: דיבידנד MSTY ══════════════════════════════════
+  // ══ שלב 3: דיבידנד MSTY (V2.6.1: כל יום, לא רק חמישי, וכל ההיסטוריה) ══
+  console.log("\n📅 שולף דיבידנדי MSTY מ-Yahoo (3 חודשים אחורה)...");
   let nextDividend = null;
-  if (IS_THURSDAY) {
-    console.log("\n📅 יום חמישי — שולף דיבידנד MSTY מ-Yahoo...");
-    nextDividend = await yahooDividend("MSTY");
-    if (nextDividend) {
-      console.log(`  ✅ דיבידנד: $${nextDividend.amount} · ex: ${nextDividend.exDate} · pay: ${nextDividend.payDate}`);
-    } else {
-      console.log("  ⚠ לא נמצא — null");
-      warnings.push("MSTY dividend: לא נמצא — בדוק yieldmaxetfs.com ידנית");
-    }
+  let recentDividends = [];
+  const divResult = await yahooDividend("MSTY");
+  if (divResult) {
+    nextDividend = { amount: divResult.amount, exDate: divResult.exDate, payDate: divResult.payDate, status: divResult.status, source: divResult.source };
+    recentDividends = divResult.recent || [];
+    console.log(`  ✅ אחרון: $${nextDividend.amount} · ex: ${nextDividend.exDate}`);
+    console.log(`  📊 סה"כ ${recentDividends.length} דיבידנדים ב-3 חודשים אחרונים:`);
+    recentDividends.slice(0, 8).forEach(d => console.log(`     • ${d.exDate} → $${d.amount}`));
   } else {
-    // V2.5.2: קרא מ-Firestore בלבד
+    // V2.6.1: fallback — קרא מ-Firestore אם Yahoo נכשל
     const prev = await fsRead("market_data", "latest");
     nextDividend = prev?.msty?.nextDividend ?? { amount: null, exDate: null, payDate: null, status: "estimate" };
-    if (nextDividend?.amount) console.log(`\n  📋 דיבידנד מ-Firestore: $${nextDividend.amount}`);
+    recentDividends = prev?.msty?.recentDividends || [];
+    if (nextDividend?.amount) console.log(`  📋 fallback מ-Firestore: $${nextDividend.amount}`);
+    else                       warnings.push("MSTY dividend: לא נמצא — בדוק yieldmaxetfs.com ידנית");
   }
 
   // ══ שלב 4: V2.5.2 — דיבידנד חזוי (מספר מניות מ-Firestore) ══
@@ -331,6 +339,7 @@ function buildSummary(msty, mstr, fx, sp500) {
       dailyChangePct:     dailyChg.msty,
       priceSource:        msty.source,
       nextDividend,
+      recentDividends,    // V2.6.1 — מערך מלא של 3 חודשים אחרונים (כל פעימות אפריל)
       projectedDividend,  // V2.5.2 — תחזית דיבידנד לפי מניות מ-Firestore
     },
     mstr: {

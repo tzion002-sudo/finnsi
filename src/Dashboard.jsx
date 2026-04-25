@@ -17,17 +17,16 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.6.0
+//  "המצפן" – HaMatzpan V2.6.1
+//  V2.6.1 — Firestore-First Live Market · Save Timeout · Dividend Backfill
+//  • useLiveMarket עובר ל-Firestore-first (Yahoo CORS חסום מהדפדפן)
+//  • subscribeToMarketData מזין live prices ב-real-time
+//  • handleManualSaveAll: 10s timeout + הצגת שגיאה אמיתית + ספירת נכסים
+//  • Backfill דיבידנדים: scanner מחזיר 3 חודשים, app ממזג ל-mstyDividends
 //  V2.6.0 — Phone↔Computer Sync · Manual Save Button · Autonomous Scanner
-//  • תיקון קריטי: loans/savings/mstyDividends/documents/mstyPrice/mstyFX
-//    זורמים עכשיו דרך subscribeToSettings → Firestore (היה localStorage בלבד)
-//  • כפתור "💾 שמור הכל" בהדר עם טוסט "נשמר ל-cloud בשעה HH:MM"
-//  • debounced save (600ms) על כל שינוי + force-save ידני ב-onClick
-//  • סקנר מתוזמן רץ ב-08:00 כל בוקר ב-Cowork (mcp scheduled-tasks)
-//  V2.5.2 — Zero LocalStorage · Firestore-Only · Precision Focus · FX conversion
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.6.0";
+const APP_VERSION = "V2.6.1";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2587,51 +2586,94 @@ async function fetchYahooPrice(ticker, fallbackTicker = null) {
   return { price: null, source: "חסום" };
 }
 
-/** Hook: מושך מחירים חיים + מרענן ב-09:00 כל יום */
+/** V2.6.1 · Hook: Firestore-First Live Market
+ *  עדיפות #1: market_data/latest (real-time subscribe — הסקנר כותב 08:00 כל בוקר)
+ *  עדיפות #2: Yahoo ישירות מהדפדפן (CORS-proxied; חסום ברוב המקרים, אבל נשאר כניסיון)
+ *  למה? Yahoo Finance חוסם CORS אגרסיבית מהדפדפן ולכן fetchYahooPrice נכשל לעיתים קרובות.
+ *  הסקנר רץ ב-Node ב-Cowork (אין CORS) ויש לו תמיד גישה — אז אנחנו מסתמכים עליו כמקור אמת.
+ */
 function useLiveMarket() {
-  const [prices, setPrices]     = useState({});   // { IBIT: {price, source, currency}, ... }
+  const [prices, setPrices]       = useState({});
   const [fetchedAt, setFetchedAt] = useState(null);
-  const [fetching, setFetching] = useState(false);
+  const [fetching, setFetching]   = useState(false);
+  const [source, setSource]       = useState("idle"); // 'firestore' | 'yahoo' | 'mixed' | 'idle'
 
+  // ── מיפוי מ-market_data/latest ל-mapping של LIVE_TRACKS ──
+  const fromFirestore = useCallback((md) => {
+    if (!md) return null;
+    const fxRate = md.fx?.usdIls;
+    return {
+      MSTY:   md.msty?.price   != null ? { price: md.msty.price,   currency: "USD", label: "MSTY",                    flag: "📈", ticker: "MSTY",       source: md.msty.priceSource   || "Firestore (scanner)" } : null,
+      MSTR:   md.mstr?.price   != null ? { price: md.mstr.price,   currency: "USD", label: "MSTR",                    flag: "🟧", ticker: "MSTR",       source: md.mstr.priceSource   || "Firestore (scanner)" } : null,
+      IBIT:   md.ibit?.price   != null ? { price: md.ibit.price,   currency: "USD", label: "Bitcoin ETF (IBIT)",      flag: "₿",  ticker: "IBIT",       source: md.ibit.priceSource   || "Firestore (scanner)" } : null,
+      SP500:  md.sp500?.price  != null ? { price: md.sp500.price,  currency: "ILS", label: "אקסלנס S&P 500 (1183441)", flag: "🇺🇸", ticker: "1183441.TA", source: md.sp500.priceSource  || "Firestore (scanner)" } : null,
+      NASDAQ: md.nasdaq?.price != null ? { price: md.nasdaq.price, currency: "ILS", label: "אקסלנס נאסד\"ק (1159243)", flag: "💻", ticker: "1159243.TA", source: md.nasdaq.priceSource || "Firestore (scanner)" } : null,
+      FX:     fxRate           != null ? { price: fxRate,          currency: "FX",  label: "USD/ILS",                 flag: "💱", ticker: "ILS=X",      source: md.fx.source          || "Firestore (scanner)" } : null,
+    };
+  }, []);
+
+  // ── Real-time subscribe ל-Firestore market_data/latest ──
+  useEffect(() => {
+    if (!isFirebaseReady()) return;
+    const unsub = subscribeToMarketData((md) => {
+      const mapped = fromFirestore(md);
+      if (!mapped) return;
+      // מיזוג: שמור על מחירים שהגיעו מ-Yahoo אם הם טריים יותר
+      setPrices(prev => {
+        const merged = { ...prev };
+        for (const [k, v] of Object.entries(mapped)) {
+          if (v && (!prev[k]?.price || prev[k]?._stale)) merged[k] = v;
+        }
+        return merged;
+      });
+      setFetchedAt(md.timestamp || new Date().toISOString());
+      setSource(prev => prev === "yahoo" ? "mixed" : "firestore");
+    });
+    return () => { try { unsub?.(); } catch {} };
+  }, [fromFirestore]);
+
+  // ── Yahoo Finance refresh (best-effort; ייכשל לעיתים קרובות בגלל CORS) ──
   const doFetch = useCallback(async () => {
     if (fetching) return;
     setFetching(true);
     const results = {};
     await Promise.allSettled(
       LIVE_TRACKS.map(async (t) => {
-        const { price, source, currency, isFallback } = await fetchYahooPrice(t.ticker, t.fallback || null);
-        results[t.id] = { price, source, currency: currency || t.currency, label: t.label, flag: t.flag, ticker: t.ticker, isFallback: !!isFallback };
+        const { price, source: src, currency, isFallback } = await fetchYahooPrice(t.ticker, t.fallback || null);
+        if (price != null) {
+          results[t.id] = { price, source: src, currency: currency || t.currency, label: t.label, flag: t.flag, ticker: t.ticker, isFallback: !!isFallback };
+        }
       })
     );
-    // V2.5.2 — FX conversion: Israeli papers fallback to USD (^GSPC/^IXIC) → multiply by USD/ILS to get ILS price
+    // FX conversion: Israeli papers fallback to USD → multiply by USD/ILS
     const fxRate = results.FX?.price;
     for (const id of ["SP500", "NASDAQ"]) {
       const r = results[id];
       if (r?.isFallback && r.price != null && r.currency !== "ILS" && fxRate) {
-        results[id] = {
-          ...r,
-          price: parseFloat((r.price * fxRate).toFixed(2)),
-          currency: "ILS",
-          source: `${r.source} × FX₪`,
-        };
+        results[id] = { ...r, price: parseFloat((r.price * fxRate).toFixed(2)), currency: "ILS", source: `${r.source} × FX₪` };
       }
     }
-    setPrices(results);
-    setFetchedAt(new Date().toISOString());
+    // Yahoo הצליח? מחק את ה-_stale מ-Firestore values, הוסף מה שהתקבל
+    if (Object.keys(results).length > 0) {
+      setPrices(prev => ({ ...prev, ...results }));
+      setFetchedAt(new Date().toISOString());
+      setSource(prev => prev === "firestore" ? "mixed" : "yahoo");
+    } else {
+      // Yahoo נכשל לחלוטין — סמן את ה-Firestore values כ-stale רק אם עברו מעל 4 שעות
+      // (הסקנר רץ 08:00, אם השעה אחרי 13:00 הנתון מתחיל להיות ישן)
+      console.warn("Yahoo browser fetch failed — relying on Firestore market_data/latest");
+    }
     setFetching(false);
-  }, []);   // eslint-disable-line
+  }, [fetching]);
 
+  // ── רענון פעם בכניסה + רענון אוטומטי כל 30 דק' (במקום פעם ב-09:00) ──
   useEffect(() => {
     doFetch();
-    // רענון ב-09:00 הבא (יום מחר אם כבר עבר)
-    const now = new Date();
-    const next9 = new Date(now); next9.setHours(9, 0, 0, 0);
-    if (next9 <= now) next9.setDate(next9.getDate() + 1);
-    const timer = setTimeout(doFetch, next9 - now);
-    return () => clearTimeout(timer);
-  }, [doFetch]);
+    const interval = setInterval(doFetch, 30 * 60 * 1000); // 30min
+    return () => clearInterval(interval);
+  }, []); // eslint-disable-line
 
-  return { prices, fetchedAt, fetching, refresh: doFetch };
+  return { prices, fetchedAt, fetching, source, refresh: doFetch };
 }
 
 /** LiveMarketBar — רצועת מחירים בזמן אמת בראש הדשבורד
@@ -3499,31 +3541,63 @@ export default function HaMatzpanGemelnet() {
     return () => clearTimeout(t);
   }, [loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal]);
 
-  // ═══ V2.6.0 · Manual "Save All" — מאלץ כתיבה מיידית של כל המצב ל-Firestore ═══
+  // ═══ V2.6.1 · Manual "Save All" — עם timeout + error visibility ═══
+  // למה timeout? אם Firestore לא מחובר/חסום, await תקוע לנצח. עם timeout 10s
+  // המשתמש מקבל פידבק ברור במקום ספינר אינסופי.
   const handleManualSaveAll = useCallback(async () => {
     setManualSaveStatus("saving");
+    const SAVE_TIMEOUT_MS = 10000;
+    const withTimeout = (promise, label) =>
+      Promise.race([
+        promise,
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout (${label})`)), SAVE_TIMEOUT_MS)),
+      ]);
+
+    if (!isFirebaseReady()) {
+      setManualSaveStatus("error");
+      setSaveToast("❌ Firebase לא מחובר — אין יכולת לשמור ב-cloud");
+      setTimeout(() => setManualSaveStatus("idle"), 3500);
+      return;
+    }
+
     try {
-      // 1) Settings doc — loans/savings/dividends/dynamic prices
-      await saveSettings({
-        loans, savings, mstyDividends, documents,
+      // V2.6.1 — דאמפ documents אם הוא גדול מדי (Firestore doc limit = 1MB)
+      const docsSize = JSON.stringify(documents || []).length;
+      const safeDocs = docsSize > 700000 ? documents.map(d => ({ ...d, _content: undefined })) : documents;
+
+      // 1) Settings doc
+      await withTimeout(saveSettings({
+        loans, savings, mstyDividends,
+        documents: safeDocs,
         mstyPrice, mstyFX,
         excellenceLongTerm, excellenceTradeJournal,
-      });
-      // 2) Assets — כל נכס נכתב ב-saveAsset (setDoc+merge, idempotent)
-      await Promise.allSettled(assets.map(a => saveAsset(a)));
+      }), "settings");
+
+      // 2) Assets — saveAsset לכל אחד; allSettled לא מתעלם מכשלים
+      const assetResults = await withTimeout(
+        Promise.allSettled(assets.map(a => saveAsset(a))),
+        "assets"
+      );
+      const failed = assetResults.filter(r => r.status === "rejected");
+      if (failed.length > 0) {
+        const firstErr = failed[0].reason?.message || "unknown";
+        throw new Error(`${failed.length} נכסים נכשלו: ${firstErr}`);
+      }
+
       const now = new Date();
       const hh  = String(now.getHours()).padStart(2, "0");
       const mm  = String(now.getMinutes()).padStart(2, "0");
       setManualSaveStatus("saved");
-      setSaveToast(`💾 נשמר ל-cloud בשעה ${hh}:${mm}`);
+      setSaveToast(`💾 נשמר ל-cloud בשעה ${hh}:${mm} (${assets.length} נכסים + הגדרות)`);
       setCloudSyncStatus("synced");
       setCloudSyncAt(now.toISOString());
       setTimeout(() => setManualSaveStatus("idle"), 2500);
     } catch (err) {
       console.error("Manual save failed:", err);
       setManualSaveStatus("error");
-      setSaveToast("❌ שמירה נכשלה — בדוק חיבור Firestore");
-      setTimeout(() => setManualSaveStatus("idle"), 3500);
+      const msg = err?.message || "שגיאה לא ידועה";
+      setSaveToast(`❌ שמירה נכשלה: ${msg}`);
+      setTimeout(() => setManualSaveStatus("idle"), 5000);
     }
   }, [loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, assets]);
 
@@ -3582,11 +3656,38 @@ export default function HaMatzpanGemelnet() {
   }, [assets, loans, savings, mstyDividends, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal]);
 
   // ═══ V2.4.1 · Morning Brief — Firestore subscription (עובד ב-Netlify + נייד) ═══
+  // V2.6.1: גם מבצע backfill אוטומטי של recentDividends → mstyDividends
   useEffect(() => {
     const handleData = (data) => {
       if (!data?.date) return;
+
+      // ── V2.6.1 · Backfill: מיזוג כל דיבידנדי אפריל לתוך mstyDividends ──
+      const recent = data?.msty?.recentDividends;
+      if (Array.isArray(recent) && recent.length > 0) {
+        suppressSaveToastRef.current = true;
+        setMstyDividends(prev => {
+          const existing = new Set((prev || []).map(d => d.date));
+          const splitDate = "2025-12-08";
+          const additions = recent
+            .filter(r => !existing.has(r.exDate))
+            .map(r => ({
+              date:        r.exDate,
+              amount:      r.amount,
+              verified:    r.status === "confirmed",
+              status:      r.status || "confirmed",
+              shareBasis:  new Date(r.exDate) < new Date(splitDate) ? "pre" : "post",
+              source:      "scanner_backfill",
+              note:        "נוסף אוטומטית מסקנר Firestore (היסטוריית 3 חודשים)",
+            }));
+          if (additions.length === 0) return prev;
+          console.log(`✅ Backfill: נוספו ${additions.length} דיבידנדים מהסקנר`);
+          return [...prev, ...additions];
+        });
+      }
+
+      // הצגת המודל עצמה (לא להציג אם המשתמש כבר אישר היום)
       const ackKey = `morning_ack_${data.date}`;
-      if (lsLoad(ackKey, false)) return; // כבר אושר היום
+      if (lsLoad(ackKey, false)) return;
       setMorningBrief(data);
     };
 
