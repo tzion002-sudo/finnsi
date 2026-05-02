@@ -2,22 +2,38 @@ name: Daily Market Scan
 
 on:
   schedule:
-    - cron: '0 6 * * *' # יריץ כל יום ב-6 בבוקר UTC (שזה 9 בבוקר בישראל)
-  workflow_dispatch: # מאפשר הרצה ידנית בלחיצת כפתור ב-GitHub
+    # ב-05:00 UTC = 08:00 ישראל (קיץ UTC+3) — ימי חול בלבד
+    - cron: '0 5 * * 1-5'
+  workflow_dispatch:
+    # מאפשר הרצה ידנית מ-GitHub Actions בלחיצת כפתור
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # הסורק לא אמור לקחת יותר מ-10 דקות
+
     steps:
-      - uses: actions/checkout@v3
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          
+          node-version: '20'
+          cache: 'npm'
+
       - name: Install dependencies
-        run: npm install
-        
-      - name: Run Daily Scanner
+        run: npm ci --prefer-offline
+
+      - name: Run Daily Market Scanner
         run: node scripts/daily-scanner.js
+        env:
+          # משתני סביבה — כרגע לא נדרשים (API key מוטמע בסורק)
+          # להוסיף כאן אם הסורק יועבר ל-env-based credentials בעתיד
+          NODE_ENV: production
+
+      - name: Report scan result
+        if: always()
+        run: |
+          echo "✅ Scan completed at $(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "🕐 Israel time: $(TZ='Asia/Jerusalem' date '+%Y-%m-%d %H:%M')"

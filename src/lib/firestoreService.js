@@ -1,6 +1,6 @@
 /**
- * firestoreService.js – Firestore CRUD + Real-time Sync  V2.5.0
- * Project: finnsi-3a75d  |  Database: (default)
+ * firestoreService.js – Firestore CRUD + Real-time Sync  V2.7.2
+ * Project: finnsi-3a75d  |  Database: default  (NOT "(default)" — see firebase.js)
  *
  * כל פעולות הנתונים של המצפן — קריאה, כתיבה, מחיקה, האזנה.
  * אם Firebase לא מוגדר, כל הפונקציות עובדות על localStorage כ-fallback.
@@ -167,6 +167,22 @@ export async function saveMonthlyBatch(updates) {
   await batch.commit();
 }
 
+/**
+ * V2.7.0 — Batch-save ALL assets in a single Firestore commit.
+ * Replaces handleManualSaveAll's N individual saveAsset() calls.
+ * Stays under the 500-write limit (typical family has <20 assets).
+ */
+export async function saveAllAssets(assets) {
+  if (!isFirebaseReady() || !assets?.length) return;
+  const batch = writeBatch(db);
+  for (const asset of assets) {
+    const { id, ...payload } = asset;
+    payload.updatedAt = serverTimestamp();
+    batch.set(assetRef(id), payload, { merge: true });
+  }
+  await batch.commit();
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  SETTINGS
 // ════════════════════════════════════════════════════════════════════════════
@@ -206,13 +222,14 @@ export async function saveSettings(settings) {
 export function subscribeToSettings(onSettings, onError) {
   if (!isFirebaseReady()) {
     const cached = lsLoad('compass_settings', null);
-    if (cached) onSettings(cached);
+    onSettings(cached || {}); // V2.7.0: תמיד מדווח (גם אם ריק) כדי לאפס את ה-hydration timer
     return () => {};
   }
   return onSnapshot(
     settingsRef(),
     snap => {
-      if (snap.exists()) onSettings(snap.data());
+      // V2.7.0: מדווח גם כשהמסמך לא קיים (משתמש חדש) — מונע כתיבת defaults לפני טעינת cloud
+      onSettings(snap.exists() ? snap.data() : {});
     },
     err => {
       console.error('subscribeToSettings:', err);
@@ -307,15 +324,27 @@ export async function saveMarketData(data) {
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
- * Seeds the assets collection if it is empty.
- * Safe to call on every app startup — no-op when data already exists.
+ * Seeds the assets collection if it is empty AND has never been seeded before.
+ * Uses a permanent `hasBeenSeeded` flag on the family document to prevent
+ * accidental re-seeding after a temporary network disconnect or app restart.
  * seedArray: [{ id, ...assetFields }]
  */
 export async function seedAssetsIfEmpty(seedArray) {
   if (!isFirebaseReady() || !seedArray?.length) return false;
   try {
+    // ── V2.6.1: בדוק דגל קבוע — אם כבר זרענו פעם אחת, לעולם לא נזרע שוב ──
+    const familySnap = await getDoc(familyRef());
+    if (familySnap.exists() && familySnap.data()?.hasBeenSeeded === true) {
+      console.log('🛡️ seedAssetsIfEmpty: hasBeenSeeded=true — דילוג על זריעה');
+      return false;
+    }
+
     const snap = await getDocs(assetsCol());
-    if (!snap.empty) return false; // already has data
+    if (!snap.empty) {
+      // יש נתונים אבל הדגל לא מוגדר — עדכן את הדגל בלבד
+      await setDoc(familyRef(), { hasBeenSeeded: true }, { merge: true });
+      return false;
+    }
 
     const batch = writeBatch(db);
     for (const asset of seedArray) {
@@ -323,6 +352,9 @@ export async function seedAssetsIfEmpty(seedArray) {
       batch.set(assetRef(id), { ...data, seededAt: serverTimestamp() });
     }
     await batch.commit();
+
+    // ── סמן שזרענו — דגל קבוע שלא יאופס לעולם ──
+    await setDoc(familyRef(), { hasBeenSeeded: true }, { merge: true });
     console.log(`✅ Seeded ${seedArray.length} assets to Firestore`);
     return true;
   } catch (e) {

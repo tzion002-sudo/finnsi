@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
-import { saveAsset, subscribeToAssets, initFamily, getSettings, saveSettings, deleteAsset,
+import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, saveSettings, deleteAsset,
          subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
          subscribeToSettings } from './lib/firestoreService';
 import { isFirebaseReady } from './lib/firebase';
@@ -17,18 +17,21 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.6.3
-//  V2.6.3 — Firestore Connection Fix: forceLongPolling + Firestore always wins merge
-//  V2.6.2 — Save Fix: ignoreUndefinedProperties · 25s timeout · Firebase error codes
-//  V2.6.1 — Firestore-First Live Market · Save Timeout · Dividend Backfill
-//  • useLiveMarket עובר ל-Firestore-first (Yahoo CORS חסום מהדפדפן)
-//  • subscribeToMarketData מזין live prices ב-real-time
-//  • handleManualSaveAll: 10s timeout + הצגת שגיאה אמיתית + ספירת נכסים
-//  • Backfill דיבידנדים: scanner מחזיר 3 חודשים, app ממזג ל-mstyDividends
-//  V2.6.0 — Phone↔Computer Sync · Manual Save Button · Autonomous Scanner
+//  "המצפן" – HaMatzpan V2.8.0
+//  V2.8.0 — Morning Brief smart ack · No duplicate divs · Agora÷100 fix · IBIT USD P&L · GitHub Actions · News Hebrew labels
+//  V2.7.2 — ROOT CAUSE FIX: Firestore DB named "default" (not "(default)")
+//  V2.7.1 — Critical Save Fix · Dividends All-April · Excellence Auto-Calc
+//  • settingsHydratedRef: מסמן ONLY כשיש נתוני אמת (לא על {} ריק)
+//  • 4-sec fallback timer רק למשתמש חדש לגמרי (אין שמירה של DEFAULT_LOANS!)
+//  • cloudUpdateRef: reset מתרחש ב-200ms timeout (עמיד לריבוי re-renders ב-React 17)
+//  • mstyPrice/mstyFX: dep נפרד מה-loans/savings debounce (מונע race condition)
+//  • applyScanFindings: מייבא ALL recentDivs (כל פעימות אפריל) ולא רק nextDividend
+//  • Excellence Long Term: investedILS מחושב אוטומטית = qty × avgEntry (לא ידני)
+//  V2.7.0 — LIVE_TRACKS 3 only · 📤 Header · saveAllAssets batch write
+//  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.6.3";
+const APP_VERSION = "V2.8.0";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2035,15 +2038,17 @@ const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete }) =
           const sd = scanData;
           const warnings = [];
 
-          // V2.1.8 — Golden Sources: ערכים מ-daily_scan.json בלבד (TradingView/Yahoo/Investing.com/YieldMaxETFs)
+          // V2.7.1 — Golden Sources: ערכים מ-Firestore (market_data/latest שנכתב ע"י הסורק)
           const newMstyPrice = sd?.msty?.price ?? null;
           const newFX        = sd?.fx?.usdIls ?? null;
           const nd           = sd?.msty?.nextDividend;
-          // דיבידנד: הצג רק אם status="confirmed" (מ-YieldMaxETFs.com). אחרת — "ממתין לפרסום"
+          // דיבידנד אחרון (nextDividend)
           const newDividend  = (nd?.amount != null && nd?.exDate)
             ? { date: nd.exDate, amount: nd.amount, payDate: nd.payDate || null,
                 status: nd.status === "confirmed" ? "confirmed" : "estimate" }
             : null;
+          // V2.7.1: כל הדיבידנדים האחרונים (recentDividends) — כולל כל פעימות אפריל
+          const recentDivs   = Array.isArray(sd?.msty?.recentDividends) ? sd.msty.recentDividends : [];
           const mstrPrice    = sd?.mstr?.price ?? null;
           const mstrChange   = sd?.mstr?.changePct != null ? `${sd.mstr.changePct >= 0 ? "+" : ""}${sd.mstr.changePct}%` : null;
           const menoraMthly  = sd?.pension?.menora168?.monthlyReturn ?? null;
@@ -2066,6 +2071,7 @@ const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete }) =
               previousFX: currentFX,
               newFX: newFX,
               newDividend,
+              recentDivs,  // V2.7.1: כל הדיבידנדים מהסריקה (לא רק האחרון)
             },
             mstr: {
               price: mstrPrice,
@@ -2115,7 +2121,7 @@ const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete }) =
           {/* נקודה מרכזית */}
           <Radio size={10} className="relative text-white drop-shadow" strokeWidth={3}/>
         </span>
-        <span>{scanning ? "סורק..." : "Smart Scan"}</span>
+        <span>{scanning ? "סורק..." : "🔄 עדכן מחירים"}</span>
         {scanning && <Sparkles size={12} className="animate-spin text-cyan-200"/>}
       </button>
 
@@ -2425,31 +2431,47 @@ const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
           </div>
         )}
 
-        {/* חדשות */}
+        {/* חדשות — V2.8.0: תווית עברית + סיכום description */}
         {Array.isArray(news) && news.length > 0 && (
           <div className="bg-slate-950/40 border border-slate-700/50 rounded-lg p-3 mb-4">
             <p className="text-xs font-bold text-slate-200 mb-2 flex items-center gap-1.5">
               <FileText size={12} className="text-sky-400"/> ידיעות חדשותיות ({news.length})
             </p>
-            <ul className="space-y-2">
-              {news.slice(0, 5).map((n, i) => (
-                <li key={i} className="text-[11px] border-r-2 border-sky-500/50 pr-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="inline-block text-[8px] font-bold bg-sky-500/20 border border-sky-400/50 text-sky-300 px-1.5 py-0.5 rounded uppercase tracking-wide">
-                      {n.ticker || "news"}
-                    </span>
-                    {n.url ? (
-                      <a href={n.url} target="_blank" rel="noreferrer" className="text-sky-200 hover:text-sky-100 font-semibold hover:underline">
-                        {n.title}
-                      </a>
-                    ) : (
-                      <span className="text-sky-200 font-semibold">{n.title}</span>
+            <ul className="space-y-2.5">
+              {news.slice(0, 5).map((n, i) => {
+                // V2.8.0: תווית עברית לפי ticker
+                const tickerLabelMap = { MSTY: "MSTY · YieldMax", MSTR: "MSTR · MicroStrategy", IBIT: "IBIT · Bitcoin ETF", BTC: "Bitcoin" };
+                const tickerColor    = { MSTY: "emerald", MSTR: "sky", IBIT: "amber", BTC: "orange" }[n.ticker] || "sky";
+                const colorClass     = { emerald:"bg-emerald-500/20 border-emerald-400/50 text-emerald-300",
+                                         sky:    "bg-sky-500/20 border-sky-400/50 text-sky-300",
+                                         amber:  "bg-amber-500/20 border-amber-400/50 text-amber-300",
+                                         orange: "bg-orange-500/20 border-orange-400/50 text-orange-300" }[tickerColor];
+                const borderColor    = { emerald:"border-emerald-500/50", sky:"border-sky-500/50",
+                                         amber:"border-amber-500/50", orange:"border-orange-500/50" }[tickerColor];
+                const label = tickerLabelMap[n.ticker] || n.ticker || "news";
+                const srcLabel = n.sourceHe || n.source || "";
+                return (
+                  <li key={i} className={`text-[11px] border-r-2 ${borderColor} pr-2`}>
+                    <div className="flex items-start gap-1.5">
+                      <span className={`shrink-0 mt-0.5 inline-block text-[8px] font-bold border ${colorClass} px-1.5 py-0.5 rounded uppercase tracking-wide`}>
+                        {label}
+                      </span>
+                      {n.url ? (
+                        <a href={n.url} target="_blank" rel="noreferrer" className="text-slate-100 hover:text-white font-semibold hover:underline leading-snug">
+                          {n.title}
+                        </a>
+                      ) : (
+                        <span className="text-slate-100 font-semibold leading-snug">{n.title}</span>
+                      )}
+                    </div>
+                    {/* V2.8.0: סיכום מה-description אם קיים */}
+                    {n.summary && (
+                      <p className="text-slate-400 text-[10px] leading-snug mt-0.5 pr-1 line-clamp-2">{n.summary}</p>
                     )}
-                  </div>
-                  <p className="text-slate-400 leading-snug mt-0.5">{n.summary}</p>
-                  {n.source && <p className="text-[9px] text-slate-500 mt-0.5">מקור: {n.source}</p>}
-                </li>
-              ))}
+                    {srcLabel && <p className="text-[9px] text-slate-600 mt-0.5">מקור: {srcLabel}</p>}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
@@ -2535,19 +2557,19 @@ const CompoundProjection = ({ asset }) => {
 //  ⚠️ No manual lock applied to auto-tracked assets — dynamic NAV
 // ══════════════════════════════════════════════════════════════
 
-// V2.5.1 — fallback: אם .TA חסום, נסה מדד US בסיסי (יחס זהה, מועיל לחישוב NAV)
+// V2.7.0 — רק 3 טיקרים רלוונטיים (IBIT/SP500/Nasdaq הוסרו — תמיד N/A ומבלבלים)
 const LIVE_TRACKS = [
-  { id:"IBIT",   ticker:"IBIT",       label:"Bitcoin ETF (IBIT)", currency:"USD", flag:"₿" },
-  { id:"MSTY",   ticker:"MSTY",       label:"MSTY",               currency:"USD", flag:"📈" },
-  { id:"SP500",  ticker:"1183441.TA", fallback:"^GSPC",           label:"אקסלנס S&P 500 (1183441)",  currency:"ILS", flag:"🇺🇸" },
-  { id:"NASDAQ", ticker:"1159243.TA", fallback:"^IXIC",           label:"אקסלנס נאסד\"ק (1159243)",   currency:"ILS", flag:"💻" },
-  { id:"FX",     ticker:"ILS=X",      label:"USD/ILS",            currency:"FX",  flag:"💱" },
+  { id:"MSTY", ticker:"MSTY",  label:"MSTY",    currency:"USD", flag:"📈" },
+  { id:"MSTR", ticker:"MSTR",  label:"MSTR",    currency:"USD", flag:"🟧" },
+  { id:"FX",   ticker:"ILS=X", label:"USD/ILS", currency:"FX",  flag:"💱" },
 ];
 
 // מיפוי: id → שדה ב-lastScan (לנתון אחרון ידוע במקרה של חסימה)
+// כולל IBIT/SP500/NASDAQ לשימוש בטאב אקסלנס (גם אם לא בבר הטיקרים)
 const STALE_KEY = {
-  IBIT:   d => d?.ibit?.price,
   MSTY:   d => d?.msty?.price,
+  MSTR:   d => d?.mstr?.price,
+  IBIT:   d => d?.ibit?.price,
   SP500:  d => d?.sp500?.price,
   NASDAQ: d => d?.nasdaq?.price,
   FX:     d => d?.fx?.usdIls,
@@ -2604,13 +2626,15 @@ function useLiveMarket() {
   const fromFirestore = useCallback((md) => {
     if (!md) return null;
     const fxRate = md.fx?.usdIls;
+    // V2.7.0 — מיפוי כל המחירים מה-scanner לשימוש פנימי (כולל SP500/NASDAQ/IBIT לטאב אקסלנס)
+    // הבר המחירים מציג רק MSTY/MSTR/FX (ב-LIVE_TRACKS) — זה בנפרד
     return {
-      MSTY:   md.msty?.price   != null ? { price: md.msty.price,   currency: "USD", label: "MSTY",                    flag: "📈", ticker: "MSTY",       source: md.msty.priceSource   || "Firestore (scanner)" } : null,
-      MSTR:   md.mstr?.price   != null ? { price: md.mstr.price,   currency: "USD", label: "MSTR",                    flag: "🟧", ticker: "MSTR",       source: md.mstr.priceSource   || "Firestore (scanner)" } : null,
-      IBIT:   md.ibit?.price   != null ? { price: md.ibit.price,   currency: "USD", label: "Bitcoin ETF (IBIT)",      flag: "₿",  ticker: "IBIT",       source: md.ibit.priceSource   || "Firestore (scanner)" } : null,
+      MSTY:   md.msty?.price   != null ? { price: md.msty.price,   currency: "USD", label: "MSTY",                     flag: "📈", ticker: "MSTY",       source: md.msty.priceSource   || "Firestore (scanner)" } : null,
+      MSTR:   md.mstr?.price   != null ? { price: md.mstr.price,   currency: "USD", label: "MSTR",                     flag: "🟧", ticker: "MSTR",       source: md.mstr.priceSource   || "Firestore (scanner)" } : null,
+      IBIT:   md.ibit?.price   != null ? { price: md.ibit.price,   currency: "USD", label: "Bitcoin ETF (IBIT)",       flag: "₿",  ticker: "IBIT",       source: md.ibit.priceSource   || "Firestore (scanner)" } : null,
       SP500:  md.sp500?.price  != null ? { price: md.sp500.price,  currency: "ILS", label: "אקסלנס S&P 500 (1183441)", flag: "🇺🇸", ticker: "1183441.TA", source: md.sp500.priceSource  || "Firestore (scanner)" } : null,
       NASDAQ: md.nasdaq?.price != null ? { price: md.nasdaq.price, currency: "ILS", label: "אקסלנס נאסד\"ק (1159243)", flag: "💻", ticker: "1159243.TA", source: md.nasdaq.priceSource || "Firestore (scanner)" } : null,
-      FX:     fxRate           != null ? { price: fxRate,          currency: "FX",  label: "USD/ILS",                 flag: "💱", ticker: "ILS=X",      source: md.fx.source          || "Firestore (scanner)" } : null,
+      FX:     fxRate           != null ? { price: fxRate,          currency: "FX",  label: "USD/ILS",                  flag: "💱", ticker: "ILS=X",      source: md.fx.source          || "Firestore (scanner)" } : null,
     };
   }, []);
 
@@ -2956,10 +2980,12 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
 //  Long Term: פסיביים (S&P 500, Nasdaq, Bitcoin) · NAV חי + תשואה מצטברת
 //  Trade Journal: יומן מסחר אקטיבי עם עריכה inline + שמירה מיידית ב-Firestore
 // ══════════════════════════════════════════════════════════════
+// V2.8.0: priceUnit:"agora" → Yahoo Finance מחזיר ניירות ישראליים ב-אגורות (÷100 לקבל ₪)
+//         priceUnit:"usd"  → IBIT, avgEntry מוזן בדולרים, P&L מוצג בדולרים
 const EXCELLENCE_LONG_TEMPLATE = [
-  { id:"sp500",   label:"S&P 500",   ticker:"SP500",  currency:"ILS", color:"#22c55e", liveKey:"SP500",  note:"תל-אביב 1183441 · הצמדה כפולה למדד/FX" },
-  { id:"nasdaq",  label:"Nasdaq",    ticker:"NASDAQ", currency:"ILS", color:"#3b82f6", liveKey:"NASDAQ", note:"תל-אביב 1159243" },
-  { id:"bitcoin", label:"Bitcoin",   ticker:"IBIT",   currency:"USD", color:"#f59e0b", liveKey:"IBIT",   note:"iShares Bitcoin Trust ETF" },
+  { id:"sp500",   label:"S&P 500",   ticker:"SP500",  currency:"ILS", priceUnit:"agora", color:"#22c55e", liveKey:"SP500",  note:"תל-אביב 1183441 · מחיר Yahoo ב-אגורות ÷100=₪" },
+  { id:"nasdaq",  label:"Nasdaq",    ticker:"NASDAQ", currency:"ILS", priceUnit:"agora", color:"#3b82f6", liveKey:"NASDAQ", note:"תל-אביב 1159243 · מחיר Yahoo ב-אגורות ÷100=₪" },
+  { id:"bitcoin", label:"Bitcoin",   ticker:"IBIT",   currency:"USD", priceUnit:"usd",   color:"#f59e0b", liveKey:"IBIT",   note:"iShares Bitcoin Trust ETF · avgEntry ב-$" },
 ];
 
 /** Long-Term allocation (all zero by default — user will provide data later) */
@@ -2984,38 +3010,58 @@ const computePnL = (row) => {
   return +((x - e) * q).toFixed(2);
 };
 
-// V2.4.0 — ExcellenceLongRow: כרטיס מידע מלא בשקלים, נוסחת תשואה מדויקת
+// V2.8.0 — ExcellenceLongRow: תיקון אגורות + IBIT ב-USD
+// priceUnit="agora" → Yahoo Finance מחזיר ניירות ישראליים ב-אגורות → ÷100 לשקלים
+// priceUnit="usd"   → IBIT: avgEntry בדולרים, P&L מוצג בדולרים
 const ExcellenceLongRow = ({ holding, live, fx }) => {
   const def      = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === holding.id) || {};
   const fxRate   = fx || 3.6;
-  const priceNow = live?.price ?? null;
-  const hasLive  = priceNow != null && holding.qty > 0;
+  const rawPrice = live?.price ?? null; // כפי שמגיע מ-Yahoo (אגורות / דולרים / שקלים)
 
-  // ── שווי שוק בשקלים (תמיד ILS) ──
-  let marketValueILS = 0;
-  if (hasLive) {
-    marketValueILS = def.currency === "USD"
-      ? priceNow * holding.qty * fxRate
-      : priceNow * holding.qty;
-  } else {
-    marketValueILS = holding.investedILS || 0;
+  // ── V2.8.0: נרמול מחיר לפי יחידות ──
+  const priceILS = rawPrice != null
+    ? (def.priceUnit === "agora" ? rawPrice / 100              // אגורות → שקלים
+     : def.priceUnit === "usd"   ? rawPrice * fxRate           // דולרים → שקלים (לצורך ILS total)
+     :                             rawPrice)                   // כבר בשקלים
+    : null;
+  const priceUSD = rawPrice != null && def.priceUnit === "usd" ? rawPrice : null; // לדיוור $
+  const hasLive  = priceILS != null && holding.qty > 0;
+
+  // ── שווי שוק בשקלים (לסך כולל של ה-tab) ──
+  const marketValueILS = hasLive ? priceILS * holding.qty
+                       : holding.investedILS || 0;
+
+  // ── עלות: investedILS שנשמר (V2.8.0: מחושב נכון בupdateHolding) ──
+  const invested  = holding.investedILS || 0;
+
+  // ── P&L: עבור IBIT — בדולרים; עבור ישראלי — בשקלים ──
+  let pnlDisplay = null, returnPct = 0;
+  if (def.priceUnit === "usd" && priceUSD != null && holding.avgEntry > 0) {
+    // IBIT: הכל בדולרים
+    const mktUSD  = priceUSD * holding.qty;
+    const costUSD = holding.avgEntry * holding.qty;
+    const pnlUSD  = mktUSD - costUSD;
+    returnPct     = costUSD > 0 ? ((mktUSD / costUSD) - 1) * 100 : 0;
+    pnlDisplay    = { usd: pnlUSD, ils: pnlUSD * fxRate };
+  } else if (invested > 0) {
+    // ניירות ישראליים: הכל בשקלים
+    const pnlILS = marketValueILS - invested;
+    returnPct    = ((marketValueILS / invested) - 1) * 100;
+    pnlDisplay   = { usd: null, ils: pnlILS };
   }
 
-  const invested  = holding.investedILS || 0;
-  const pnlILS    = invested > 0 ? marketValueILS - invested : 0;
-  // נוסחה מדויקת: (שווי נוכחי / עלות) − 1
-  const returnPct = invested > 0 ? ((marketValueILS / invested) - 1) * 100 : 0;
-
+  const pnlILS   = pnlDisplay?.ils ?? 0;
   const pnlColor    = pnlILS > 0 ? "text-emerald-400" : pnlILS < 0 ? "text-rose-400" : "text-slate-400";
   const borderHover = pnlILS > 0 ? "hover:border-emerald-500/60" : pnlILS < 0 ? "hover:border-rose-500/60" : "hover:border-slate-500/40";
   const borderBase  = pnlILS > 0 ? "border-emerald-800/40" : pnlILS < 0 ? "border-rose-800/40" : "border-slate-700/60";
 
-  // תצוגת מחיר שוק
-  const currentPriceDisplay = priceNow != null
-    ? (def.currency === "USD" ? `$${priceNow}` : `₪${priceNow.toLocaleString("he-IL")}`)
+  // ── תצוגת מחיר שוק (במחיר המנורמל) ──
+  const adjustedPrice = rawPrice != null && def.priceUnit === "agora" ? rawPrice / 100 : rawPrice;
+  const currentPriceDisplay = adjustedPrice != null
+    ? (def.priceUnit === "usd" ? `$${adjustedPrice}` : `₪${adjustedPrice.toLocaleString("he-IL")}`)
     : "—";
   const buyPriceDisplay = holding.avgEntry > 0
-    ? (def.currency === "USD" ? `$${holding.avgEntry}` : `₪${holding.avgEntry}`)
+    ? (def.priceUnit === "usd" ? `$${holding.avgEntry}` : `₪${holding.avgEntry}`)
     : "—";
 
   return (
@@ -3049,15 +3095,24 @@ const ExcellenceLongRow = ({ holding, live, fx }) => {
           <div className="font-mono text-slate-100 font-bold">{fmt(marketValueILS)}</div>
         </div>
         <div className="bg-slate-800/60 rounded-lg p-2.5">
-          <div className="text-[10px] text-slate-500 mb-0.5">רווח / הפסד (₪)</div>
-          <div className={`font-mono font-bold ${pnlColor}`}>
-            {invested > 0 ? `${pnlILS >= 0 ? "+" : ""}${fmt(pnlILS)}` : "—"}
+          {/* V2.8.0: IBIT — P&L בדולרים; ניירות ישראליים — בשקלים */}
+          <div className="text-[10px] text-slate-500 mb-0.5">
+            {pnlDisplay?.usd != null ? "רווח / הפסד ($)" : "רווח / הפסד (₪)"}
           </div>
+          <div className={`font-mono font-bold ${pnlColor}`}>
+            {pnlDisplay == null ? "—"
+              : pnlDisplay.usd != null
+                ? `${pnlDisplay.usd >= 0 ? "+" : ""}$${Math.abs(pnlDisplay.usd).toLocaleString("en", { maximumFractionDigits: 0 })}`
+                : `${pnlILS >= 0 ? "+" : ""}${fmt(pnlILS)}`}
+          </div>
+          {pnlDisplay?.usd != null && pnlDisplay.ils != null && (
+            <div className="text-[9px] text-slate-500 mt-0.5">≈ {pnlDisplay.ils >= 0 ? "+" : ""}{fmt(Math.round(pnlDisplay.ils))}</div>
+          )}
         </div>
         <div className="bg-slate-800/60 rounded-lg p-2.5">
           <div className="text-[10px] text-slate-500 mb-0.5">תשואה %</div>
           <div className={`font-mono font-bold ${pnlColor}`}>
-            {invested > 0 ? `${returnPct >= 0 ? "+" : ""}${returnPct.toFixed(2)}%` : "—"}
+            {(pnlDisplay == null && invested === 0) ? "—" : `${returnPct >= 0 ? "+" : ""}${returnPct.toFixed(2)}%`}
           </div>
         </div>
       </div>
@@ -3106,20 +3161,24 @@ const TradeJournalRow = ({ row, onChange, onDelete }) => {
 const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, liveMarket, fx }) => {
   const fxRate = fx || 3.6;
 
-  // ── חישוב ערכים לכל אחזקה ──
+  // ── V2.8.0: חישוב ערכים לכל אחזקה (תיקון אגורות + IBIT ב-USD) ──
   const enriched = longTerm.map(h => {
     const def      = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === h.id) || {};
     const live     = liveMarket[def.liveKey];
-    const priceNow = live?.price ?? null;
+    const rawPrice = live?.price ?? null;
+    // נרמול מחיר: אגורות÷100=₪ / USD×FX=₪
+    const priceILS = rawPrice != null
+      ? (def.priceUnit === "agora" ? rawPrice / 100
+       : def.priceUnit === "usd"   ? rawPrice * fxRate
+       :                             rawPrice)
+      : null;
     let marketValueILS = 0;
-    if (priceNow != null && h.qty > 0) {
-      marketValueILS = def.currency === "USD"
-        ? priceNow * h.qty * fxRate
-        : priceNow * h.qty;
+    if (priceILS != null && h.qty > 0) {
+      marketValueILS = priceILS * h.qty;
     } else {
       marketValueILS = h.investedILS || 0;
     }
-    return { ...h, def, live, priceNow, marketValueILS, invested: h.investedILS || 0 };
+    return { ...h, def, live, priceILS, marketValueILS, invested: h.investedILS || 0 };
   });
 
   const totalInvested = enriched.reduce((s, h) => s + h.invested,        0);
@@ -3147,8 +3206,19 @@ const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, l
     { id:`tj-${Date.now()}`, ticker:"", qty:0, entryPrice:0, exitPrice:0, pnlUSD:0, notes:"", status:"open", date:today() }]);
   const updateTradeRow  = (id, next) => setTradeJournal(prev => prev.map(r => r.id === id ? next : r));
   const deleteTradeRow  = (id)       => setTradeJournal(prev => prev.filter(r => r.id !== id));
-  const updateHolding   = (id, field, value) =>
-    setLongTerm(prev => prev.map(h => h.id === id ? { ...h, [field]: parseFloat(value) || 0 } : h));
+  // V2.8.0: כשמשנים qty או avgEntry, מחשבים investedILS אוטומטית
+  // IBIT (priceUnit:"usd"): investedILS = qty × avgEntry(USD) × fxRate
+  // ניירות ישראליים (priceUnit:"agora"): investedILS = qty × avgEntry(₪)
+  const updateHolding = (id, field, value) =>
+    setLongTerm(prev => prev.map(h => {
+      if (h.id !== id) return h;
+      const def     = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === id) || {};
+      const updated = { ...h, [field]: parseFloat(value) || 0 };
+      updated.investedILS = def.priceUnit === 'usd'
+        ? (updated.qty || 0) * (updated.avgEntry || 0) * (mstyFX || 3.6)  // $ → ₪
+        : (updated.qty || 0) * (updated.avgEntry || 0);                     // ₪ ישירות
+      return updated;
+    }));
 
   const journalTotals = tradeJournal.reduce((acc, r) => {
     acc.count++; acc.pnl += parseFloat(r.pnlUSD) || 0; return acc;
@@ -3284,39 +3354,48 @@ const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, l
 
         {/* עריכה inline */}
         <div className="bg-slate-900/40 border border-slate-700/50 rounded-xl p-3">
-          <p className="text-[11px] font-semibold text-slate-300 mb-2">✏️ עריכת אחזקות (נשמר אוטומטית ב-Firestore)</p>
+          <p className="text-[11px] font-semibold text-slate-300 mb-2">✏️ עריכת אחזקות — <span className="text-emerald-400">עלות כוללת מחושבת אוטומטית</span> (נשמר ב-Firestore)</p>
           <table className="w-full text-[11px]">
             <thead>
               <tr className="text-slate-500 border-b border-slate-700/50">
                 <th className="text-right p-1.5 font-medium">נכס</th>
-                <th className="text-right p-1.5 font-medium">כמות</th>
-                <th className="text-right p-1.5 font-medium">עלות ממוצעת</th>
-                <th className="text-right p-1.5 font-medium">סה"כ הושקע (₪)</th>
+                <th className="text-right p-1.5 font-medium">כמות יחידות</th>
+                <th className="text-right p-1.5 font-medium">מחיר קנייה ממוצע</th>
+                <th className="text-right p-1.5 font-medium text-emerald-400">עלות כוללת (₪) 🔒</th>
               </tr>
             </thead>
             <tbody>
               {longTerm.map(h => {
                 const def = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === h.id) || {};
+                const computedInvested = (h.qty || 0) * (h.avgEntry || 0);
                 return (
                   <tr key={h.id} className="border-b border-slate-700/20">
                     <td className="p-1.5 text-slate-200 font-semibold">
                       <span className="inline-block w-2 h-2 rounded-full ml-1.5" style={{ background: def.color }}/>
                       {def.label}
+                      <div className="text-[9px] text-slate-500 mt-0.5">{def.note}</div>
                     </td>
                     <td className="p-1.5">
                       <input type="number" value={h.qty ?? 0}
                         onChange={e => updateHolding(h.id, "qty", e.target.value)}
-                        className="w-20 bg-slate-800/80 border border-slate-700/70 rounded px-2 py-1 font-mono text-slate-100 focus:outline-none focus:border-emerald-500/60"/>
-                    </td>
-                    <td className="p-1.5">
-                      <input type="number" value={h.avgEntry ?? 0}
-                        onChange={e => updateHolding(h.id, "avgEntry", e.target.value)}
+                        placeholder="0"
                         className="w-24 bg-slate-800/80 border border-slate-700/70 rounded px-2 py-1 font-mono text-slate-100 focus:outline-none focus:border-emerald-500/60"/>
                     </td>
                     <td className="p-1.5">
-                      <input type="number" value={h.investedILS ?? 0}
-                        onChange={e => updateHolding(h.id, "investedILS", e.target.value)}
-                        className="w-28 bg-slate-800/80 border border-slate-700/70 rounded px-2 py-1 font-mono text-slate-100 focus:outline-none focus:border-emerald-500/60"/>
+                      <div className="flex items-center gap-1">
+                        <input type="number" value={h.avgEntry ?? 0}
+                          onChange={e => updateHolding(h.id, "avgEntry", e.target.value)}
+                          placeholder="0"
+                          className="w-28 bg-slate-800/80 border border-slate-700/70 rounded px-2 py-1 font-mono text-slate-100 focus:outline-none focus:border-emerald-500/60"/>
+                        <span className="text-slate-500 text-[9px]">{def.currency}</span>
+                      </div>
+                    </td>
+                    <td className="p-1.5">
+                      {/* V2.7.1: עלות כוללת מחושבת אוטומטית = כמות × מחיר קנייה ממוצע */}
+                      <div className="bg-emerald-900/20 border border-emerald-700/30 rounded px-2 py-1 font-mono text-emerald-300 font-bold text-[12px]">
+                        ₪{computedInvested.toLocaleString("he-IL", { maximumFractionDigits: 0 })}
+                      </div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">{h.qty || 0} × {h.avgEntry || 0} = {computedInvested.toLocaleString("he-IL", { maximumFractionDigits: 0 })}</div>
                     </td>
                   </tr>
                 );
@@ -3500,49 +3579,101 @@ export default function HaMatzpanGemelnet() {
   // (loans, savings, dividends, mstyPrice, mstyFX, documents, excellence)
   // השינוי הזה תיקן את הבאג הקריטי של "שמירה בטלפון לא מגיעה למחשב"
   const settingsHydratedRef = useRef(false);
-  const cloudUpdateRef     = useRef(false); // V2.6.0: מסמן שינוי שמגיע מ-onSnapshot כדי לדכא auto-save חוזר
+  const cloudUpdateRef      = useRef(false);
+  const newUserTimerRef     = useRef(null); // V2.7.1: fallback למשתמש חדש ללא נתוני cloud
+  const currentSettingsRef  = useRef(null); // V2.7.2: תמיד עדכני לנתוני settings (לשמירה מהטיימר)
   useEffect(() => {
     const unsub = subscribeToSettings(
       (s) => {
-        if (!s) return;
-        // העדכון מגיע מ-cloud (לא עריכה ידנית) — דכא את ה-save-toast והאוטו-שמירה
-        suppressSaveToastRef.current = true;
-        cloudUpdateRef.current = true;
-        if (Array.isArray(s.loans))                  setLoans(s.loans);
-        if (Array.isArray(s.savings))                setSavings(s.savings);
-        if (Array.isArray(s.mstyDividends))          setMstyDividends(s.mstyDividends);
-        if (Array.isArray(s.documents))              setDocuments(s.documents);
-        if (typeof s.mstyPrice === "number")         setMstyPrice(s.mstyPrice);
-        if (typeof s.mstyFX === "number")            setMstyFX(s.mstyFX);
-        if (Array.isArray(s.excellenceLongTerm))     setExcellenceLongTerm(s.excellenceLongTerm);
-        if (Array.isArray(s.excellenceTradeJournal)) setExcellenceTradeJournal(s.excellenceTradeJournal);
-        settingsHydratedRef.current = true;
+        // V2.7.1: s הוא {} כשמסמך לא קיים (Firestore cache מחזיר not-found לפני network).
+        // **אסור לסמן hydrated על {}** — אחרת debounce יכתוב DEFAULT_LOANS לפני שנתוני cloud מגיעים!
+        const hasData = s != null && Object.keys(s).length > 0;
+
+        if (hasData) {
+          // נתוני אמת הגיעו מ-Firestore — הכנס לסטייט
+          suppressSaveToastRef.current = true;
+          cloudUpdateRef.current = true;
+          if (Array.isArray(s.loans))                  setLoans(s.loans);
+          if (Array.isArray(s.savings))                setSavings(s.savings);
+          if (Array.isArray(s.mstyDividends))          setMstyDividends(s.mstyDividends);
+          if (Array.isArray(s.documents))              setDocuments(s.documents);
+          if (typeof s.mstyPrice === "number")         setMstyPrice(s.mstyPrice);
+          if (typeof s.mstyFX === "number")            setMstyFX(s.mstyFX);
+          if (Array.isArray(s.excellenceLongTerm))     setExcellenceLongTerm(s.excellenceLongTerm);
+          if (Array.isArray(s.excellenceTradeJournal)) setExcellenceTradeJournal(s.excellenceTradeJournal);
+          // מסמן hydrated רק כשיש נתונים אמיתיים
+          settingsHydratedRef.current = true;
+          // מבטל timer של משתמש חדש (אם רץ)
+          if (newUserTimerRef.current) { clearTimeout(newUserTimerRef.current); newUserTimerRef.current = null; }
+        } else {
+          // {} = מסמך לא קיים (משתמש חדש לגמרי) — מתחיל timer ארוך
+          // הנחנו שאם network לא מגיב תוך 4 שניות — כנראה משתמש חדש
+          if (!settingsHydratedRef.current && !newUserTimerRef.current) {
+            newUserTimerRef.current = setTimeout(() => {
+              settingsHydratedRef.current = true;
+              newUserTimerRef.current = null;
+              // V2.7.2: שמור מיד את מצב ה-settings הנוכחי (כולל mstyPrice מהסריקה)
+              if (currentSettingsRef.current) {
+                saveSettings(currentSettingsRef.current)
+                  .catch(e => console.warn('init-save failed:', e));
+              }
+            }, 4000);
+          }
+        }
       },
-      (err) => console.warn("subscribeToSettings failed:", err)
+      (err) => {
+        console.warn("subscribeToSettings failed:", err);
+        settingsHydratedRef.current = true;
+      }
     );
-    // Failsafe: if no settings doc exists at all, mark hydrated after 2s so writes can begin
-    const tFallback = setTimeout(() => { settingsHydratedRef.current = true; }, 2000);
-    return () => { try { unsub?.(); } catch {} clearTimeout(tFallback); };
+    return () => {
+      try { unsub?.(); } catch {}
+      if (newUserTimerRef.current) { clearTimeout(newUserTimerRef.current); newUserTimerRef.current = null; }
+    };
   }, []);
 
-  // Debounced auto-save: כל שינוי במצבים האלה נשמר ב-Firestore אחרי 600ms.
-  // settingsHydratedRef מבטיח שלא נדרוס נתוני cloud עם defaults לפני שטענו.
-  // cloudUpdateRef מונע לולאת echo: שינוי שמגיע מ-onSnapshot לא ייכתב חזרה.
+  // Debounced auto-save — V2.7.1 fixes:
+  // 1. mstyPrice/mstyFX הוסרו מה-deps: הם מגיעים מה-live-market, לא מעריכת משתמש.
+  //    שינויהם גרם ל-debounce לירות לפני שנתוני cloud נטענו (race condition → DEFAULT_LOANS נכתב).
+  //    הם כן נכללים ב-payload כדי שלא יאבדו בשמירה.
+  // 2. cloudUpdateRef.current = false מתרחש בתוך ה-timeout (לא סינכרוני) כדי לא להסתכן
+  //    עם re-render מרובות מ-React 17 (שלא מבצע batch על async callbacks).
+  // V2.7.2: עדכן ref תמיד לנתוני settings הנוכחיים (לשמירה מהטיימר של משתמש חדש)
+  currentSettingsRef.current = {
+    loans, savings, mstyDividends, documents,
+    mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal,
+  };
+
   useEffect(() => {
     if (!settingsHydratedRef.current) return;
     if (cloudUpdateRef.current) {
-      cloudUpdateRef.current = false;
-      return;
+      // השינוי הגיע מ-cloud — דחה ב-200ms ואז אפס, כך כל ה-re-renders של ה-batch נקלטים
+      const t = setTimeout(() => { cloudUpdateRef.current = false; }, 200);
+      return () => clearTimeout(t);
     }
     const t = setTimeout(() => {
       saveSettings({
         loans, savings, mstyDividends, documents,
-        mstyPrice, mstyFX,
+        mstyPrice, mstyFX,      // payload כולל מחירים — אבל לא גורמים ל-trigger
         excellenceLongTerm, excellenceTradeJournal,
       }).catch(err => console.warn("auto-saveSettings failed:", err));
-    }, 600);
+    }, 800); // הגדלנו ל-800ms כדי לתת זמן ל-cloud update להגיע
     return () => clearTimeout(t);
-  }, [loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loans, savings, mstyDividends, documents, excellenceLongTerm, excellenceTradeJournal]);
+
+  // V2.7.1 — שמירת mstyPrice/mstyFX בנפרד (לא חלק מה-debounce הראשי כדי למנוע race)
+  // נשמרים רק כשמשתמש/סריקה מעדכנים (לא כשמגיע מ-cloud — cloudUpdateRef מגן)
+  useEffect(() => {
+    if (!settingsHydratedRef.current) return;
+    if (cloudUpdateRef.current) return; // cloudUpdateRef יתאפס ב-timeout הראשי
+    const t = setTimeout(() => {
+      saveSettings({ loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal })
+        .catch(err => console.warn("price-save failed:", err));
+    }, 800);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mstyPrice, mstyFX]);
 
   // ═══ V2.6.1 · Manual "Save All" — עם timeout + error visibility ═══
   // למה timeout? אם Firestore לא מחובר/חסום, await תקוע לנצח. עם timeout 10s
@@ -3576,16 +3707,8 @@ export default function HaMatzpanGemelnet() {
         excellenceLongTerm, excellenceTradeJournal,
       }), "settings");
 
-      // 2) Assets — saveAsset לכל אחד; allSettled לא מתעלם מכשלים
-      const assetResults = await withTimeout(
-        Promise.allSettled(assets.map(a => saveAsset(a))),
-        "assets"
-      );
-      const failed = assetResults.filter(r => r.status === "rejected");
-      if (failed.length > 0) {
-        const firstErr = failed[0].reason?.message || "unknown";
-        throw new Error(`${failed.length} נכסים נכשלו: ${firstErr}`);
-      }
+      // 2) Assets — V2.7.0: batch write (single commit) במקום N קריאות נפרדות
+      await withTimeout(saveAllAssets(assets), "assets");
 
       const now = new Date();
       const hh  = String(now.getHours()).padStart(2, "0");
@@ -3632,24 +3755,7 @@ export default function HaMatzpanGemelnet() {
     })();
   }, [cloudSyncStatus, assets]);
 
-  // ═══ V2.4.1 · Auto-scan banner: אם אחרי 09:00 ולא רצה סריקה היום ═══
-  useEffect(() => {
-    const now      = new Date();
-    const todayStr = now.toISOString().slice(0, 10);
-    const hour     = now.getHours();
-    const ackKey   = `morning_ack_${todayStr}`;
-    if (hour < 9 || lsLoad(ackKey, false)) return;
-    // Firestore: בדוק אם market_data/latest הוא של היום
-    getMarketData()
-      .then(data => { if (!data || data.date !== todayStr) setMissedScanBanner(true); })
-      .catch(() => {
-        // fallback: daily_scan.json
-        fetch("/daily_scan.json", { cache: "no-store" })
-          .then(r => r.ok ? r.json() : null)
-          .then(data => { if (!data || data.date !== todayStr) setMissedScanBanner(true); })
-          .catch(() => setMissedScanBanner(true));
-      });
-  }, []);
+  // V2.7.0 — missedScanBanner הוסר. מחירים נטענים אוטומטית מ-Firestore ב-useLiveMarket.
 
   // ═══ V2.1.6 · Save-Toast — מציג הודעה קטנה בכל עריכה ידנית ═══
   useEffect(() => {
@@ -3694,10 +3800,18 @@ export default function HaMatzpanGemelnet() {
         });
       }
 
-      // הצגת המודל עצמה (לא להציג אם המשתמש כבר אישר היום)
-      const ackKey = `morning_ack_${data.date}`;
-      if (lsLoad(ackKey, false)) return;
-      setMorningBrief(data);
+      // הצגת המודל — V2.8.0: ack חכם לפי תוכן (לא רק תאריך)
+      // מפתח כולל: תאריך סריקה + ex-date של הדיבידנד האחרון + מחיר MSTY (לזיהוי שינוי)
+      const divExDate  = data.msty?.nextDividend?.exDate || "none";
+      const mstyPriceKey = data.msty?.price != null ? Math.round(data.msty.price * 10) : "X"; // precision 0.1
+      const ackKey = `morning_ack_${data.date}_d${divExDate}_p${mstyPriceKey}`;
+      if (lsLoad(ackKey, false)) {
+        // נתון כבר ראינו — עדכן מחיר ושער בשקט ללא מודל
+        if (data.msty?.price != null) setMstyPrice(data.msty.price);
+        if (data.fx?.usdIls  != null) setMstyFX(data.fx.usdIls);
+        return;
+      }
+      setMorningBrief({ ...data, _ackKey: ackKey });
     };
 
     // Firestore: real-time subscription ל-market_data/latest
@@ -3742,12 +3856,15 @@ export default function HaMatzpanGemelnet() {
     if (!morningBrief) return;
     const findings = briefToFindings(morningBrief);
     applyScanFindings(findings);
-    lsSave(`morning_ack_${morningBrief.date}`, true);
+    // V2.8.0: שמור ack לפי מפתח התוכן (לא רק תאריך)
+    if (morningBrief._ackKey) lsSave(morningBrief._ackKey, true);
+    lsSave(`morning_ack_${morningBrief.date}`, true); // backwards compat
     setMorningBrief(null);
   };
 
   const dismissMorningBrief = () => {
-    // לא מסמן כ"אושר" — ה-brief יחזור ברענון, אלא אם תלחץ "אשר"
+    // V2.8.0: dismiss גם שומר ack — כדי שלא יחזור מחר עם אותו תוכן
+    if (morningBrief?._ackKey) lsSave(morningBrief._ackKey, true);
     setMorningBrief(null);
   };
 
@@ -3825,30 +3942,30 @@ export default function HaMatzpanGemelnet() {
         changes.push(`💱 שער USD/ILS עודכן ל-${findings.msty.newFX} (היה ${prev})`);
       }
     }
-    // 3) דיבידנד חדש (רק אם עוד לא קיים) — מסומן כ"צפי" אם עתידי
-    if (findings?.msty?.newDividend) {
-      const nd = findings.msty.newDividend;
-      const exists = mstyDividends.some(x => x.date === nd.date);
-      if (!exists) {
-        const splitDate = "2025-12-08";
-        const basis = new Date(nd.date) < new Date(splitDate) ? "pre" : "post";
-        const isFuture = new Date(nd.date) > new Date();
-        // אם הסריקה סימנה במפורש "confirmed" — נסמוך על זה; אחרת לפי תאריך
-        const status = nd.status || (isFuture ? "estimate" : "confirmed");
-        setMstyDividends(prev => [
-          ...prev,
-          {
-            date: nd.date, amount: nd.amount,
-            verified: status === "confirmed",
+    // 3) דיבידנד חדש — V2.8.0: רק newDividend (ולא recentDivs שגורמים כפילויות)
+    // recentDivs מטופל באופן אוטומטי ע"י Firestore backfill ב-handleData (subscribeToMarketData)
+    // כאן רק מוסיפים דיבידנד אחד — אם הוא חדש (exDate לא קיים בסטייט)
+    {
+      const splitDate = "2025-12-08";
+      const nd = findings?.msty?.newDividend;
+      if (nd?.date && nd?.amount != null) {
+        setMstyDividends(prev => {
+          // בדוק שהדיבידנד לא קיים כבר (לפי תאריך)
+          if (prev.some(x => x.date === nd.date)) return prev;
+          const status = nd.status === "confirmed" ? "confirmed"
+            : new Date(nd.date) > new Date() ? "estimate" : "confirmed";
+          const entry = {
+            date:       nd.date,
+            amount:     nd.amount,
+            verified:   status === "confirmed",
             status,
-            shareBasis: basis,
-            source: "smart_scan",
-            note: status === "estimate" ? "צפי — מסריקה אוטומטית (לא ייכלל ב-ROI עד אישור)" : "נוסף אוטומטית מסריקה"
-          }
-        ]);
-        changes.push(status === "estimate"
-          ? `🔮 צפי דיבידנד חדש: ${nd.date} @ $${nd.amount}/מניה (לא ייכלל ב-ROI עד שיאושר)`
-          : `💰 דיבידנד מאושר חדש: ${nd.date} @ $${nd.amount}/מניה`);
+            shareBasis: new Date(nd.date) < new Date(splitDate) ? "pre" : "post",
+            source:     "smart_scan",
+            note:       status === "estimate" ? "צפי — מסריקה (לא ייכלל ב-ROI עד אישור)" : "נוסף מסריקה ידנית",
+          };
+          changes.push(`💰 דיבידנד חדש $${nd.amount} (ex-date ${nd.date})`);
+          return [...prev, entry];
+        });
       }
     }
     // 4) עדכון תשואת פנסיה מנורה (נכס id:"1" של ציון) — V2.1.7: מדלג אם _manualLock פעיל
@@ -4025,74 +4142,43 @@ export default function HaMatzpanGemelnet() {
           </div>
           <p className="text-slate-400 text-sm mt-1">דשבורד ניהול הון משפחתי · גמל-נט · הלוואות · חסכונות</p>
         </div>
+        {/* V2.7.0 — Header buttons: 3 only (Upload + SmartScan + Gemelnet) + tiny cloud dot */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* V2.6.0 — Manual Save All button (visible feedback for phone↔computer sync) */}
-          <button
-            onClick={handleManualSaveAll}
-            disabled={manualSaveStatus === "saving"}
-            title="כתיבה מיידית של כל המצב ל-Firestore (assets + loans + savings + dividends)"
-            className={`flex items-center gap-1.5 text-xs font-bold px-3 py-2 rounded-full border shadow-md transition-all ${
-              manualSaveStatus === "saved"   ? "bg-emerald-600 border-emerald-400 text-white shadow-emerald-500/40 scale-105" :
-              manualSaveStatus === "saving"  ? "bg-cyan-700 border-cyan-500 text-cyan-100 cursor-wait" :
-              manualSaveStatus === "error"   ? "bg-rose-700 border-rose-500 text-white" :
-                                               "bg-gradient-to-r from-emerald-600 to-teal-600 border-emerald-400/60 text-white hover:from-emerald-500 hover:to-teal-500 shadow-emerald-500/30"
+          {/* Cloud sync dot — tiny, non-intrusive */}
+          <span
+            title={cloudSyncAt ? `ענן: ${new Date(cloudSyncAt).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}` : "Firestore · finnsi-3a75d"}
+            className={`w-2.5 h-2.5 rounded-full border flex-shrink-0 ${
+              cloudSyncStatus === "synced"  ? "bg-emerald-400 border-emerald-300" :
+              cloudSyncStatus === "syncing" ? "bg-cyan-400 border-cyan-300 animate-pulse" :
+              cloudSyncStatus === "error"   ? "bg-rose-400 border-rose-300" :
+              cloudSyncStatus === "local"   ? "bg-amber-400 border-amber-300" :
+                                              "bg-slate-500 border-slate-400"
             }`}
-          >
-            {manualSaveStatus === "saving" ? <Activity size={13} className="animate-spin"/> :
-             manualSaveStatus === "saved"  ? <CheckCircle2 size={13}/> :
-             manualSaveStatus === "error"  ? <AlertCircle size={13}/> :
-                                             <Save size={13}/>}
-            {manualSaveStatus === "saving" ? "שומר..." :
-             manualSaveStatus === "saved"  ? "נשמר ✅" :
-             manualSaveStatus === "error"  ? "נכשל ❌" :
-                                             "💾 שמור הכל"}
+          />
+          {/* Upload report */}
+          <button onClick={() => fileRef.current?.click()} disabled={uploading}
+            className={`flex items-center gap-1.5 text-sm font-semibold ${uploading ? "bg-slate-600 cursor-wait" : "bg-emerald-600 hover:bg-emerald-500"} text-white px-3 py-1.5 rounded-lg shadow`}>
+            {uploading ? <><Activity size={14} className="animate-spin"/> מעבד...</> : <><Upload size={14}/> 📤 העלה דוח קופה</>}
           </button>
+          <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.xlsm,.pdf,.txt" onChange={handleFileUpload} className="hidden"/>
+          {/* Smart Scan */}
           <SmartScanButton
             currentPrice={mstyPrice}
             currentFX={mstyFX}
             onApply={applyScanFindings}
             onScanComplete={setScanFindings}
           />
+          {/* Last scan time badge */}
           {lastScan && (
-            <span className="flex items-center gap-1.5 text-[10px] bg-slate-800/60 border border-slate-600/40 text-slate-300 px-2 py-1.5 rounded-full" title="סריקה אחרונה">
-              <Sparkles size={10} className="text-emerald-400"/>
+            <span className="flex items-center gap-1 text-[10px] bg-slate-800/60 border border-slate-600/40 text-slate-300 px-2 py-1.5 rounded-full" title="סריקה אחרונה">
+              <Sparkles size={9} className="text-emerald-400"/>
               {new Date(lastScan.timestamp).toLocaleString("he-IL", { hour:"2-digit", minute:"2-digit", day:"2-digit", month:"2-digit" })}
             </span>
           )}
-          {/* V2.1.9 — Cloud Sync Status Badge */}
-          <span className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-full border ${
-            cloudSyncStatus === "synced"  ? "bg-emerald-900/30 border-emerald-700/40 text-emerald-300" :
-            cloudSyncStatus === "syncing" ? "bg-cyan-900/30 border-cyan-700/40 text-cyan-300" :
-            cloudSyncStatus === "error"   ? "bg-rose-900/30 border-rose-700/40 text-rose-300" :
-            cloudSyncStatus === "local"   ? "bg-amber-900/30 border-amber-700/40 text-amber-300" :
-                                            "bg-slate-800/60 border-slate-600/40 text-slate-400"
-          }`} title={cloudSyncAt ? `סנכרון ל-Firestore: ${new Date(cloudSyncAt).toLocaleTimeString("he-IL",{hour:"2-digit",minute:"2-digit"})}` : "Firestore · finnsi-3a75d"}>
-            {cloudSyncStatus === "syncing" ? <Activity size={11} className="animate-spin"/> :
-             cloudSyncStatus === "synced"  ? <CheckCircle2 size={11}/> :
-             cloudSyncStatus === "error"   ? <AlertCircle size={11}/> :
-             cloudSyncStatus === "local"   ? <Database size={11}/> :
-                                             <Wifi size={11}/>}
-            {cloudSyncStatus === "synced"  ? "ענן ✅" :
-             cloudSyncStatus === "syncing" ? "מסנכרן..." :
-             cloudSyncStatus === "error"   ? "שגיאת ענן" :
-             cloudSyncStatus === "local"   ? "מקומי" :
-                                             "Firestore"}
-          </span>
-          <button
-            onClick={handleResetStorage}
-            className="flex items-center gap-1 text-[10px] bg-slate-800/60 hover:bg-rose-900/50 border border-slate-600/40 hover:border-rose-600/60 text-slate-400 hover:text-rose-200 px-2 py-1.5 rounded-full transition-colors"
-            title="איפוס נתונים מקומיים (localStorage)"
-          >
-            <Database size={10}/> איפוס
-          </button>
-          <button onClick={() => fileRef.current?.click()} disabled={uploading}
-            className={`flex items-center gap-1.5 text-sm ${uploading ? "bg-slate-600" : "bg-emerald-600 hover:bg-emerald-500"} text-white px-3 py-1.5 rounded-lg shadow`}>
-            {uploading ? <><Activity size={14} className="animate-spin"/> מעבד...</> : <><Upload size={14}/> עדכון נתונים (Excel/PDF)</>}
-          </button>
-          <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.xlsm,.pdf,.txt" onChange={handleFileUpload} className="hidden"/>
+          {/* Gemelnet link */}
           <a href={GEMELNET_URL} target="_blank" rel="noreferrer"
             className="flex items-center gap-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded-lg">
-            <ExternalLink size={14}/> גמל-נט
+            <ExternalLink size={14}/> ↗ גמל-נט
           </a>
         </div>
       </header>
@@ -4109,21 +4195,7 @@ export default function HaMatzpanGemelnet() {
         </div>
       )}
 
-      {/* REMINDER */}
-      {showReminder && (
-        <div className="bg-amber-900/30 border border-amber-600/50 rounded-xl p-4 mb-5 flex items-start gap-3">
-          <Bell size={20} className="text-amber-400 mt-0.5 animate-pulse"/>
-          <div className="flex-1">
-            <p className="text-amber-200 font-semibold">תזכורת חודשית — גמל-נט</p>
-            <p className="text-amber-300/80 text-sm mt-1">ציון, הגיע הזמן לעדכן נתוני גמל-נט.</p>
-            <div className="flex gap-2 mt-2">
-              <a href={GEMELNET_URL} target="_blank" rel="noreferrer" className="text-xs bg-amber-600 hover:bg-amber-500 text-white px-3 py-1 rounded flex items-center gap-1">
-                <Download size={11}/> פתח גמל-נט
-              </a>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* V2.7.0 — תזכורת חודשית גמל-נט הוסרה (מבלבל; הקישור זמין בכפתור הראשי) */}
 
       {/* TABS */}
       <div className="flex items-center gap-1 mb-5 border-b border-slate-700 overflow-x-auto">
@@ -4351,14 +4423,7 @@ export default function HaMatzpanGemelnet() {
         />
       )}
 
-      {/* V2.1.7 · Missed Scan Banner — מופיע אם אחרי 09:00 וסריקה לא רצה */}
-      {missedScanBanner && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-amber-900/90 border border-amber-600/70 text-amber-100 text-xs font-semibold px-4 py-3 rounded-xl shadow-xl shadow-amber-900/40 backdrop-blur-sm">
-          <Bell size={14} className="text-amber-300 animate-pulse flex-shrink-0"/>
-          <span>הסריקה היומית טרם רצה היום — לחץ Smart Scan להפעלה ידנית</span>
-          <button onClick={() => setMissedScanBanner(false)} className="mr-1 text-amber-300 hover:text-white"><X size={12}/></button>
-        </div>
-      )}
+      {/* V2.7.0 — Missed Scan Banner הוסר (מבלבל; מחירים נטענים אוטומטית מ-Firestore) */}
 
       <footer className="mt-8 p-4 bg-slate-800/30 border border-slate-700/50 rounded-xl text-xs text-slate-400 leading-relaxed">
         <div className="flex items-start gap-2 mb-3">

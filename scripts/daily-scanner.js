@@ -1,17 +1,26 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Daily Scanner  –  V2.5.2
+//  HaMatzpan · Daily Scanner  –  V2.8.0
 //  Precision Focus: MSTR · MSTY · IBIT · Excellence 1183441/1159243 · FX
 //
+//  V2.8.0:
+//    • News: MSTY Yahoo RSS + MSTR + IBIT (הסרת BTC גנרי)
+//    • News: description → summary (כמה משפטים ראשונים בעברית)
+//    • News: sourceHe — תווית מקור עברית לפי ticker
+//    • News: הסרת כפילויות (dedup by title)
+//  V2.7.0:
+//    • MSTY dividends: yieldmaxetfs.com כמקור ראשי (weekly, 4-5/month)
+//    • Yahoo fallback: range=6mo (במקום 3mo)
+//    • MSTY announcements: חדשות/הכרזות מ-yieldmaxetfs.com מוזרמות ל-news
 //  V2.5.2:
 //    • Israeli papers: 1183441.TA / 1159243.TA → fallback ^GSPC/^IXIC × FX = ILS
 //    • MSTY projected dividend = sharesCount (Firestore) × div/share × 0.75 × FX
-//    • News fetch: MSTR / BTC / IBIT רגולציה בלבד (Yahoo RSS)
 //    • Firestore-only: ללא כתיבת JSON מקומי
 //    • כותב ל: market_data/latest · market_history/{date} · scanner_status/latest
 // ═══════════════════════════════════════════════════════════════
 
 import https from "https";
+import { exec } from "child_process";
 
 const TODAY       = new Date().toISOString().slice(0, 10);
 const YESTERDAY   = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -33,7 +42,7 @@ function httpsRequest(url, options = {}, body = null) {
   return new Promise((resolve, reject) => {
     const req = https.request(url, {
       method:  options.method || "GET",
-      headers: { "Content-Type": "application/json", "User-Agent": "HaMatzpan-Scanner/2.5.2", ...(options.headers || {}) },
+      headers: { "Content-Type": "application/json", "User-Agent": "HaMatzpan-Scanner/2.7.0", ...(options.headers || {}) },
       timeout: options.timeout || 12000,
     }, res => {
       let data = "";
@@ -80,9 +89,92 @@ async function yahooPrice(ticker, fallbackTicker = null) {
   return { price: null, changePct: null, currency: null, source: "unavailable", isFallback: false };
 }
 
-// ── Yahoo Finance — dividend (V2.6.1: כל 3 חודשים אחרונים) ─────
+// ── YieldMax ETFs — dividend scraper (V2.7.0: מקור ראשי) ──────
+/** שולף דיבידנדים + הכרזות מ-yieldmaxetfs.com/our-etfs/msty/ */
+async function yieldmaxDividend() {
+  const url = "https://www.yieldmaxetfs.com/our-etfs/msty/";
+  try {
+    const { status, body: html } = await httpsRequest(url, {
+      timeout: 15000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    if (status !== 200 || typeof html !== "string") return null;
+
+    // ── חלץ שורות טבלת דיבידנדים ──
+    // טבלה מכילה: Ex-Dividend Date | Record Date | Pay Date | Amount
+    const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+    const cellRegex = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    const cleanHTML = (s) => s.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").trim();
+    const dateRegex = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/;
+    const amountRegex = /\$?([\d]+\.[\d]{2,4})/;
+
+    const dividends = [];
+    let rowMatch;
+    while ((rowMatch = rowRegex.exec(html)) !== null) {
+      const rowText = rowMatch[1];
+      const cells = [];
+      let cellMatch;
+      const cellRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+      while ((cellMatch = cellRe.exec(rowText)) !== null) {
+        cells.push(cleanHTML(cellMatch[1]));
+      }
+      if (cells.length >= 3) {
+        // נסה למצוא ex-date + amount
+        const exDateStr = cells.find(c => dateRegex.test(c) && !c.includes("$"));
+        const amountStr = cells.find(c => amountRegex.test(c));
+        if (exDateStr && amountStr) {
+          const dm = dateRegex.exec(exDateStr);
+          const am = amountRegex.exec(amountStr);
+          if (dm && am) {
+            const exDate = `${dm[3]}-${String(dm[1]).padStart(2,"0")}-${String(dm[2]).padStart(2,"0")}`;
+            const amount = parseFloat(am[1]);
+            if (amount > 0 && amount < 5) { // sanity check: MSTY divs are $0.1–$4
+              const payDateStr = cells.find(c => dateRegex.test(c) && c !== exDateStr);
+              let payDate = exDate; // fallback
+              if (payDateStr) {
+                const pm = dateRegex.exec(payDateStr);
+                if (pm) payDate = `${pm[3]}-${String(pm[1]).padStart(2,"0")}-${String(pm[2]).padStart(2,"0")}`;
+              }
+              dividends.push({ amount, exDate, payDate, status: "confirmed", source: "YieldMax ETFs" });
+            }
+          }
+        }
+      }
+    }
+
+    if (dividends.length === 0) return null;
+
+    // מיין לפי תאריך יורד (הכי חדש ראשון)
+    dividends.sort((a, b) => b.exDate.localeCompare(a.exDate));
+    const latest = dividends[0];
+
+    // ── חלץ הכרזות חשובות (announcements/press-releases) ──
+    const announcements = [];
+    const announcementRegex = /<(?:h[1-4]|p|li|div)[^>]*>([\s\S]{20,300}?)<\/(?:h[1-4]|p|li|div)>/gi;
+    const keywords = /distribution|announce|dividend|special|yield|fund|nav|earnings/i;
+    let annoMatch;
+    while ((annoMatch = announcementRegex.exec(html)) !== null && announcements.length < 5) {
+      const text = cleanHTML(annoMatch[1]);
+      if (keywords.test(text) && text.length > 30 && text.length < 200) {
+        announcements.push({ title: text, source: "YieldMax ETFs", pubDate: TODAY, ticker: "MSTY" });
+      }
+    }
+
+    console.log(`  ✅ yieldmaxetfs.com: ${dividends.length} דיבידנדים | ${announcements.length} הכרזות`);
+    return { ...latest, recent: dividends, announcements };
+  } catch (e) {
+    console.log(`    ⚠ yieldmaxetfs.com: ${e.message}`);
+    return null;
+  }
+}
+
+// ── Yahoo Finance — dividend (V2.7.0: fallback כשyieldmaxetfs.com נכשל) ─────
 async function yahooDividend(ticker) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=3mo&events=div`;
+  // הגדל ל-6mo לקבלת כל הפעימות השבועיות (MSTY משלם 4-5 פעמים בחודש)
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=6mo&events=div`;
   try {
     const { body } = await httpsRequest(url);
     const divs = body?.chart?.result?.[0]?.events?.dividends;
@@ -97,14 +189,14 @@ async function yahooDividend(ticker) {
       }));
       const latest = all[0];
       if (latest) {
-        return { ...latest, recent: all }; // V2.6.1: כולל היסטוריית 3 חודשים
+        return { ...latest, recent: all }; // כולל היסטוריית 6 חודשים
       }
     }
   } catch {}
   return null;
 }
 
-// ── News fetch — Yahoo Finance RSS ───────────────────────────
+// ── News fetch — Yahoo Finance RSS (V2.8.0: כולל description כסיכום) ──────
 async function fetchRssHeadlines(ticker, maxItems = 2) {
   const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(ticker)}&region=US&lang=en-US`;
   try {
@@ -112,12 +204,16 @@ async function fetchRssHeadlines(ticker, maxItems = 2) {
     if (status !== 200 || typeof body !== "string") return [];
     const items = [];
     const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+    const clean = s => s.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").trim();
     let m;
     while ((m = itemRegex.exec(body)) !== null && items.length < maxItems) {
       const title   = (m[1].match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || m[1].match(/<title>(.*?)<\/title>/))?.[1]?.trim() || "";
       const link    = (m[1].match(/<link>(.*?)<\/link>/))?.[1]?.trim() || "";
       const pubDate = (m[1].match(/<pubDate>(.*?)<\/pubDate>/))?.[1]?.trim() || "";
-      if (title) items.push({ title, url: link, pubDate });
+      // V2.8.0: שלוף description (= כמה משפטים ראשונים של הכתבה) כסיכום
+      const descRaw = (m[1].match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/) || m[1].match(/<description>([\s\S]*?)<\/description>/))?.[1] || "";
+      const summary = clean(descRaw).slice(0, 200) || null;
+      if (title) items.push({ title, url: link, pubDate, summary });
     }
     return items;
   } catch { return []; }
@@ -210,7 +306,7 @@ function buildSummary(msty, mstr, fx, sp500) {
 // ══════════════════════════════════════════════════════════════
 (async () => {
   console.log("\n╔══════════════════════════════════════════════╗");
-  console.log("║  HaMatzpan Daily Scanner  V2.5.2 — Precision║");
+  console.log("║  HaMatzpan Daily Scanner  V2.8.0 — Precision║");
   console.log(`║  ${new Date().toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" })}                    ║`);
   console.log("╚══════════════════════════════════════════════╝\n");
 
@@ -253,24 +349,38 @@ function buildSummary(msty, mstr, fx, sp500) {
   if (!sp500.price)  warnings.push("נייר 1183441 (S&P500 אקסלנס): חסום" + (sp500.isFallback ? " → נעשה שימוש ב-^GSPC×FX" : ""));
   if (!nasdaq.price) warnings.push("נייר 1159243 (נאסד\"ק אקסלנס): חסום" + (nasdaq.isFallback ? " → נעשה שימוש ב-^IXIC×FX" : ""));
 
-  // ══ שלב 3: דיבידנד MSTY (V2.6.1: כל יום, לא רק חמישי, וכל ההיסטוריה) ══
-  console.log("\n📅 שולף דיבידנדי MSTY מ-Yahoo (3 חודשים אחורה)...");
+  // ══ שלב 3: דיבידנד MSTY (V2.7.0: yieldmaxetfs.com ראשוני, Yahoo fallback) ══
+  console.log("\n📅 שולף דיבידנדי MSTY מ-yieldmaxetfs.com (מקור ראשוני)...");
   let nextDividend = null;
   let recentDividends = [];
-  const divResult = await yahooDividend("MSTY");
-  if (divResult) {
-    nextDividend = { amount: divResult.amount, exDate: divResult.exDate, payDate: divResult.payDate, status: divResult.status, source: divResult.source };
-    recentDividends = divResult.recent || [];
-    console.log(`  ✅ אחרון: $${nextDividend.amount} · ex: ${nextDividend.exDate}`);
-    console.log(`  📊 סה"כ ${recentDividends.length} דיבידנדים ב-3 חודשים אחרונים:`);
+  let mstyAnnouncements = [];
+
+  // מקור ראשוני: yieldmaxetfs.com
+  const ymResult = await yieldmaxDividend();
+  if (ymResult && ymResult.recent?.length > 0) {
+    nextDividend   = { amount: ymResult.amount, exDate: ymResult.exDate, payDate: ymResult.payDate, status: ymResult.status, source: ymResult.source };
+    recentDividends = ymResult.recent;
+    mstyAnnouncements = ymResult.announcements || [];
+    console.log(`  ✅ YieldMax: $${nextDividend.amount} · ex: ${nextDividend.exDate}`);
+    console.log(`  📊 סה"כ ${recentDividends.length} דיבידנדים:`);
     recentDividends.slice(0, 8).forEach(d => console.log(`     • ${d.exDate} → $${d.amount}`));
   } else {
-    // V2.6.1: fallback — קרא מ-Firestore אם Yahoo נכשל
-    const prev = await fsRead("market_data", "latest");
-    nextDividend = prev?.msty?.nextDividend ?? { amount: null, exDate: null, payDate: null, status: "estimate" };
-    recentDividends = prev?.msty?.recentDividends || [];
-    if (nextDividend?.amount) console.log(`  📋 fallback מ-Firestore: $${nextDividend.amount}`);
-    else                       warnings.push("MSTY dividend: לא נמצא — בדוק yieldmaxetfs.com ידנית");
+    // Fallback: Yahoo Finance 6 חודשים אחורה
+    console.log("  ℹ yieldmaxetfs.com נכשל — fallback ל-Yahoo (6mo)...");
+    const divResult = await yahooDividend("MSTY");
+    if (divResult) {
+      nextDividend   = { amount: divResult.amount, exDate: divResult.exDate, payDate: divResult.payDate, status: divResult.status, source: divResult.source };
+      recentDividends = divResult.recent || [];
+      console.log(`  ✅ Yahoo: $${nextDividend.amount} · ${recentDividends.length} דיבידנדים ב-6 חודשים`);
+      recentDividends.slice(0, 8).forEach(d => console.log(`     • ${d.exDate} → $${d.amount}`));
+    } else {
+      // Fallback ראשוני: Firestore
+      const prev = await fsRead("market_data", "latest");
+      nextDividend   = prev?.msty?.nextDividend ?? { amount: null, exDate: null, payDate: null, status: "estimate" };
+      recentDividends = prev?.msty?.recentDividends || [];
+      if (nextDividend?.amount) console.log(`  📋 fallback מ-Firestore: $${nextDividend.amount}`);
+      else                       warnings.push("MSTY dividend: לא נמצא — בדוק yieldmaxetfs.com ידנית");
+    }
   }
 
   // ══ שלב 4: V2.5.2 — דיבידנד חזוי (מספר מניות מ-Firestore) ══
@@ -305,26 +415,37 @@ function buildSummary(msty, mstr, fx, sp500) {
     nasdaq: calcDailyChange(nasdaq.price, yesterday?.nasdaq?.price) ?? nasdaq.changePct,
   };
 
-  // ══ שלב 6: V2.5.2 — חדשות ממוקדות MSTR · BTC · IBIT ══════
-  console.log("\n📰 שולף חדשות MSTR · BTC · IBIT...");
-  const [mstrNews, btcNews, ibitNews] = await Promise.all([
-    fetchRssHeadlines("MSTR", 2),
-    fetchRssHeadlines("BTC-USD", 1),
-    fetchRssHeadlines("IBIT", 1),
+  // ══ שלב 6: V2.8.0 — חדשות רלוונטיות: MSTY · MSTR · YieldMax ══
+  // רק נושאים שמעניינים את המשתמש — לא BTC גנרי, לא IBIT כפול
+  console.log("\n📰 V2.8.0 — שולף חדשות MSTY · MSTR · YieldMax...");
+  const [mstyNews, mstrNews, ibitNews] = await Promise.all([
+    fetchRssHeadlines("MSTY",  2),   // MSTY ישירות מYahoo RSS
+    fetchRssHeadlines("MSTR",  2),   // MicroStrategy
+    fetchRssHeadlines("IBIT",  1),   // Bitcoin ETF (לא BTC גנרי)
   ]);
+
+  // V2.8.0: מקור בעברית לפי ticker
+  const heSourceLabel = { MSTY: "YieldMax MSTY", MSTR: "MicroStrategy", IBIT: "Bitcoin ETF", BTC: "Bitcoin" };
+
   const allNews = [
-    ...mstrNews.map(n => ({ ...n, ticker: "MSTR" })),
-    ...btcNews.map(n => ({ ...n, ticker: "BTC" })),
-    ...ibitNews.map(n => ({ ...n, ticker: "IBIT" })),
-  ].map(n => ({
-    title:   n.title,
-    source:  "Yahoo Finance RSS",
-    url:     n.url || "",
-    pubDate: n.pubDate || TODAY,
-    ticker:  n.ticker,
-    summary: null, // יתרגם בצד הלקוח
+    // הכרזות MSTY מ-yieldmaxetfs.com (מקור ראשי — distribution, NAV, announcements)
+    ...mstyAnnouncements.map(n => ({ ...n, ticker: "MSTY", source: "YieldMax ETFs" })),
+    // חדשות Yahoo RSS עם summary מה-description
+    ...mstyNews.map(n => ({ ...n, ticker: "MSTY", source: "Yahoo Finance" })),
+    ...mstrNews.map(n => ({ ...n, ticker: "MSTR", source: "Yahoo Finance" })),
+    ...ibitNews.map(n => ({ ...n, ticker: "IBIT", source: "Yahoo Finance" })),
+  ]
+  .filter((n, idx, arr) => arr.findIndex(x => x.title === n.title) === idx) // הסר כפילויות
+  .map(n => ({
+    title:      n.title,
+    source:     n.source || "Yahoo Finance",
+    sourceHe:   heSourceLabel[n.ticker] || n.ticker,  // V2.8.0: תווית עברית
+    url:        n.url || "",
+    pubDate:    n.pubDate || TODAY,
+    ticker:     n.ticker || "MSTY",
+    summary:    n.summary || null,   // V2.8.0: שורה מסכמת מה-description
   }));
-  console.log(`  ✅ נמצאו ${allNews.length} כותרות`);
+  console.log(`  ✅ נמצאו ${allNews.length} כותרות: ${mstyAnnouncements.length} הכרזות MSTY + ${mstyNews.length} MSTY + ${mstrNews.length} MSTR + ${ibitNews.length} IBIT`);
 
   // ══ שלב 7: בנה payload ════════════════════════════════════
   const payload = {
@@ -332,7 +453,7 @@ function buildSummary(msty, mstr, fx, sp500) {
     date:       TODAY,
     status:     "ok",
     version:    1,
-    scannedBy:  "node-scanner-v2.5.2",
+    scannedBy:  "node-scanner-v2.8.0",
     msty: {
       price:              msty.price,
       changePct:          msty.changePct,
@@ -411,7 +532,7 @@ function buildSummary(msty, mstr, fx, sp500) {
   ]);
 
   // ══ סיכום ══════════════════════════════════════════════════
-  console.log("\n── סיכום V2.5.2 Precision Focus ─────────────────────────");
+  console.log("\n── סיכום V2.8.0 Precision Focus ─────────────────────────");
   console.log(`  MSTY:      $${msty.price ?? "N/A"}  (יומי: ${dailyChg.msty != null ? (dailyChg.msty >= 0 ? "+" : "") + dailyChg.msty + "%" : "N/A"})`);
   console.log(`  MSTR:      $${mstr.price ?? "N/A"}  (יומי: ${dailyChg.mstr != null ? (dailyChg.mstr >= 0 ? "+" : "") + dailyChg.mstr + "%" : "N/A"})`);
   console.log(`  IBIT:      $${ibit.price ?? "N/A"}`);
@@ -422,4 +543,45 @@ function buildSummary(msty, mstr, fx, sp500) {
   console.log(`  חדשות:     ${allNews.length} כותרות (MSTR/BTC/IBIT)`);
   if (warnings.length) { console.log("\n── אזהרות ─"); warnings.forEach(w => console.log(`  ⚠ ${w}`)); }
   console.log("\n═════════════════════════════════════════════════════════\n");
+
+  // ══ שלב 9: התראת Windows Toast ══════════════════════════════
+  sendWindowsToast(
+    "📊 המצפן — סריקת בוקר הושלמה",
+    `MSTY: $${msty.price ?? "N/A"} · MSTR: $${mstr.price ?? "N/A"} · ₪${fx.price ?? "N/A"}/$ · ${allNews.length} חדשות`
+  );
 })();
+
+// ══ Windows Toast Notification ═══════════════════════════════
+function sendWindowsToast(title, message) {
+  // מנקה גרשיים כדי למנוע injection לתוך ה-PowerShell
+  const safeTitle   = title.replace(/'/g, "''");
+  const safeMessage = message.replace(/'/g, "''");
+
+  const ps = `
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType=WindowsRuntime] | Out-Null
+    $template = '<toast><visual><binding template="ToastGeneric"><text>${safeTitle}</text><text>${safeMessage}</text></binding></visual></toast>'
+    $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+    $xml.LoadXml($template)
+    $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+    [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('HaMatzpan').Show($toast)
+  `;
+
+  exec(`powershell -NoProfile -NonInteractive -Command "${ps.replace(/\n\s*/g, '; ')}"`,
+    (err) => {
+      if (err) {
+        // fallback — BalloonTip (Windows 10 ישן / 11 בלי WinRT)
+        const fallback = `
+          Add-Type -AssemblyName System.Windows.Forms
+          $n = New-Object System.Windows.Forms.NotifyIcon
+          $n.Icon = [System.Drawing.SystemIcons]::Information
+          $n.Visible = $true
+          $n.ShowBalloonTip(8000, '${safeTitle}', '${safeMessage}', 'Info')
+          Start-Sleep 9
+          $n.Dispose()
+        `;
+        exec(`powershell -NoProfile -NonInteractive -Command "${fallback.replace(/\n\s*/g, '; ')}"`, () => {});
+      }
+    }
+  );
+}
