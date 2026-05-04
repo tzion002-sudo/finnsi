@@ -2439,7 +2439,7 @@ const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
             </p>
             <ul className="space-y-2.5">
               {news.slice(0, 5).map((n, i) => {
-                // V2.8.0: תווית עברית לפי ticker
+                // V2.8.0: תווית עברית + צבע לפי ticker
                 const tickerLabelMap = { MSTY: "MSTY · YieldMax", MSTR: "MSTR · MicroStrategy", IBIT: "IBIT · Bitcoin ETF", BTC: "Bitcoin" };
                 const tickerColor    = { MSTY: "emerald", MSTR: "sky", IBIT: "amber", BTC: "orange" }[n.ticker] || "sky";
                 const colorClass     = { emerald:"bg-emerald-500/20 border-emerald-400/50 text-emerald-300",
@@ -2448,26 +2448,27 @@ const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
                                          orange: "bg-orange-500/20 border-orange-400/50 text-orange-300" }[tickerColor];
                 const borderColor    = { emerald:"border-emerald-500/50", sky:"border-sky-500/50",
                                          amber:"border-amber-500/50", orange:"border-orange-500/50" }[tickerColor];
-                const label = tickerLabelMap[n.ticker] || n.ticker || "news";
+                const label    = tickerLabelMap[n.ticker] || n.ticker || "news";
                 const srcLabel = n.sourceHe || n.source || "";
+                // V2.8.0: מה שמוצג = summaryHe (עברית) אם קיים, אחרת title אנגלי
+                const displayText = n.summaryHe || n.title;
                 return (
                   <li key={i} className={`text-[11px] border-r-2 ${borderColor} pr-2`}>
                     <div className="flex items-start gap-1.5">
                       <span className={`shrink-0 mt-0.5 inline-block text-[8px] font-bold border ${colorClass} px-1.5 py-0.5 rounded uppercase tracking-wide`}>
                         {label}
                       </span>
+                      {/* V2.8.0: הטקסט שמוצג = עברית; הלינק עובר לכתבה המקורית */}
                       {n.url ? (
-                        <a href={n.url} target="_blank" rel="noreferrer" className="text-slate-100 hover:text-white font-semibold hover:underline leading-snug">
-                          {n.title}
+                        <a href={n.url} target="_blank" rel="noreferrer"
+                           className="text-slate-100 hover:text-white font-semibold hover:underline leading-snug"
+                           title={n.title}>
+                          {displayText}
                         </a>
                       ) : (
-                        <span className="text-slate-100 font-semibold leading-snug">{n.title}</span>
+                        <span className="text-slate-100 font-semibold leading-snug">{displayText}</span>
                       )}
                     </div>
-                    {/* V2.8.0: סיכום מה-description אם קיים */}
-                    {n.summary && (
-                      <p className="text-slate-400 text-[10px] leading-snug mt-0.5 pr-1 line-clamp-2">{n.summary}</p>
-                    )}
                     {srcLabel && <p className="text-[9px] text-slate-600 mt-0.5">מקור: {srcLabel}</p>}
                   </li>
                 );
@@ -3075,8 +3076,8 @@ const ExcellenceLongRow = ({ holding, live, fx }) => {
         </div>
         <div className="text-left">
           <div className="text-[11px] font-mono font-bold text-emerald-300">{currentPriceDisplay}</div>
-          {def.currency === "USD" && priceNow && (
-            <div className="text-[9px] text-slate-500">≈ ₪{(priceNow * fxRate).toLocaleString("he-IL", { maximumFractionDigits: 0 })}</div>
+          {def.priceUnit === "usd" && rawPrice != null && (
+            <div className="text-[9px] text-slate-500">≈ ₪{(rawPrice * fxRate).toLocaleString("he-IL", { maximumFractionDigits: 0 })}</div>
           )}
           {!hasLive && invested > 0 && (
             <div className="text-[9px] text-amber-500">ללא מחיר חי</div>

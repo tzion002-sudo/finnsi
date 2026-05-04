@@ -196,7 +196,25 @@ async function yahooDividend(ticker) {
   return null;
 }
 
-// ── News fetch — Yahoo Finance RSS (V2.8.0: כולל description כסיכום) ──────
+// ── MyMemory: תרגום אנגלית→עברית (חינם, ללא API key) ────────────────────
+/** מתרגם טקסט קצר מאנגלית לעברית.
+ *  מגביל ל-150 תווים כדי לא לחרוג ממכסת 5000 תו/יום. */
+async function translateToHebrew(text) {
+  if (!text || text.length < 5) return null;
+  const q   = text.slice(0, 150).trim();
+  const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=en%7Che`;
+  try {
+    const { status, body } = await httpsRequest(url, { timeout: 8000 });
+    if (status === 200 && body?.responseData?.translatedText) {
+      const tr = body.responseData.translatedText.trim();
+      // MyMemory מחזיר את הטקסט המקורי אם לא הצליח לתרגם
+      if (tr && tr !== q && !tr.includes("MYMEMORY WARNING")) return tr;
+    }
+  } catch {}
+  return null;
+}
+
+// ── News fetch — Yahoo Finance RSS (V2.8.0: description → תרגום עברי) ──────
 async function fetchRssHeadlines(ticker, maxItems = 2) {
   const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(ticker)}&region=US&lang=en-US`;
   try {
@@ -210,10 +228,10 @@ async function fetchRssHeadlines(ticker, maxItems = 2) {
       const title   = (m[1].match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || m[1].match(/<title>(.*?)<\/title>/))?.[1]?.trim() || "";
       const link    = (m[1].match(/<link>(.*?)<\/link>/))?.[1]?.trim() || "";
       const pubDate = (m[1].match(/<pubDate>(.*?)<\/pubDate>/))?.[1]?.trim() || "";
-      // V2.8.0: שלוף description (= כמה משפטים ראשונים של הכתבה) כסיכום
+      // V2.8.0: description → בסיס לתרגום
       const descRaw = (m[1].match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/) || m[1].match(/<description>([\s\S]*?)<\/description>/))?.[1] || "";
-      const summary = clean(descRaw).slice(0, 200) || null;
-      if (title) items.push({ title, url: link, pubDate, summary });
+      const descEn  = clean(descRaw).slice(0, 200) || null;
+      if (title) items.push({ title, url: link, pubDate, descEn });
     }
     return items;
   } catch { return []; }
@@ -427,25 +445,32 @@ function buildSummary(msty, mstr, fx, sp500) {
   // V2.8.0: מקור בעברית לפי ticker
   const heSourceLabel = { MSTY: "YieldMax MSTY", MSTR: "MicroStrategy", IBIT: "Bitcoin ETF", BTC: "Bitcoin" };
 
-  const allNews = [
-    // הכרזות MSTY מ-yieldmaxetfs.com (מקור ראשי — distribution, NAV, announcements)
-    ...mstyAnnouncements.map(n => ({ ...n, ticker: "MSTY", source: "YieldMax ETFs" })),
-    // חדשות Yahoo RSS עם summary מה-description
+  const rawNewsItems = [
+    // הכרזות MSTY מ-yieldmaxetfs.com (כבר בעברית חלקית)
+    ...mstyAnnouncements.map(n => ({ ...n, ticker: "MSTY", source: "YieldMax ETFs", descEn: n.title })),
+    // חדשות Yahoo RSS
     ...mstyNews.map(n => ({ ...n, ticker: "MSTY", source: "Yahoo Finance" })),
     ...mstrNews.map(n => ({ ...n, ticker: "MSTR", source: "Yahoo Finance" })),
     ...ibitNews.map(n => ({ ...n, ticker: "IBIT", source: "Yahoo Finance" })),
-  ]
-  .filter((n, idx, arr) => arr.findIndex(x => x.title === n.title) === idx) // הסר כפילויות
-  .map(n => ({
-    title:      n.title,
-    source:     n.source || "Yahoo Finance",
-    sourceHe:   heSourceLabel[n.ticker] || n.ticker,  // V2.8.0: תווית עברית
-    url:        n.url || "",
-    pubDate:    n.pubDate || TODAY,
-    ticker:     n.ticker || "MSTY",
-    summary:    n.summary || null,   // V2.8.0: שורה מסכמת מה-description
+  ].filter((n, idx, arr) => arr.findIndex(x => x.title === n.title) === idx); // הסר כפילויות
+
+  // V2.8.0: תרגם כל כותרת + description לעברית (MyMemory, חינם)
+  // מתרגמים את description אם קיים, אחרת את הכותרת
+  console.log(`  🔤 מתרגם ${rawNewsItems.length} כותרות לעברית...`);
+  const allNews = await Promise.all(rawNewsItems.map(async n => {
+    const textToTranslate = n.descEn || n.title;
+    const summaryHe = await translateToHebrew(textToTranslate);
+    return {
+      title:     n.title,           // כותרת מקורית באנגלית (לא מוצגת, רק לצורך ה-url)
+      summaryHe: summaryHe || null, // V2.8.0: סיכום בעברית — זה מה שיוצג בממשק
+      source:    n.source || "Yahoo Finance",
+      sourceHe:  heSourceLabel[n.ticker] || n.ticker,
+      url:       n.url || "",
+      pubDate:   n.pubDate || TODAY,
+      ticker:    n.ticker || "MSTY",
+    };
   }));
-  console.log(`  ✅ נמצאו ${allNews.length} כותרות: ${mstyAnnouncements.length} הכרזות MSTY + ${mstyNews.length} MSTY + ${mstrNews.length} MSTR + ${ibitNews.length} IBIT`);
+  console.log(`  ✅ ${allNews.length} כותרות: ${mstyAnnouncements.length} הכרזות MSTY + ${mstyNews.length} MSTY + ${mstrNews.length} MSTR + ${ibitNews.length} IBIT | עם תרגום עברי`);
 
   // ══ שלב 7: בנה payload ════════════════════════════════════
   const payload = {
