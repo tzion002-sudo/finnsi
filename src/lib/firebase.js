@@ -12,7 +12,7 @@
  */
 
 import { initializeApp } from 'firebase/app';
-import { initializeFirestore, CACHE_SIZE_UNLIMITED } from 'firebase/firestore';
+import { initializeFirestore } from 'firebase/firestore';
 
 // ─── Firebase Config — פרויקט finnsi-3a75d ────────────────────
 const firebaseConfig = {
@@ -36,10 +36,10 @@ if (CONFIG_FILLED) {
   try {
     app = initializeApp(firebaseConfig);
     db  = initializeFirestore(app, {
-      ignoreUndefinedProperties:       true,  // מונע שגיאות כאשר שדות undefined נשלחים ל-Firestore
-      experimentalForceLongPolling:    true,  // כופה HTTP long-polling במקום WebSocket — עוקף חסימות router/firewall
-      experimentalAutoDetectLongPolling: false,
-    });
+      ignoreUndefinedProperties: true,  // מונע שגיאות כאשר שדות undefined נשלחים ל-Firestore
+      // שם מסד הנתונים הוא "default" (ללא סוגריים) — לא "(default)"!
+      // ה-SDK ברירת מחדל מחפש "(default)" אבל Firebase יצר אותו בשם "default"
+    }, 'default'); // ← חובה: ID מפורש של מסד הנתונים
     console.log('✅ Firebase connected:', firebaseConfig.projectId);
   } catch (e) {
     console.error('❌ Firebase init failed:', e.message);

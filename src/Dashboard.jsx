@@ -2633,8 +2633,8 @@ function useLiveMarket() {
       MSTY:   md.msty?.price   != null ? { price: md.msty.price,   currency: "USD", label: "MSTY",                     flag: "📈", ticker: "MSTY",       source: md.msty.priceSource   || "Firestore (scanner)" } : null,
       MSTR:   md.mstr?.price   != null ? { price: md.mstr.price,   currency: "USD", label: "MSTR",                     flag: "🟧", ticker: "MSTR",       source: md.mstr.priceSource   || "Firestore (scanner)" } : null,
       IBIT:   md.ibit?.price   != null ? { price: md.ibit.price,   currency: "USD", label: "Bitcoin ETF (IBIT)",       flag: "₿",  ticker: "IBIT",       source: md.ibit.priceSource   || "Firestore (scanner)" } : null,
-      SP500:  md.sp500?.price  != null ? { price: md.sp500.price,  currency: "ILS", label: "אקסלנס S&P 500 (1183441)", flag: "🇺🇸", ticker: "1183441.TA", source: md.sp500.priceSource  || "Firestore (scanner)" } : null,
-      NASDAQ: md.nasdaq?.price != null ? { price: md.nasdaq.price, currency: "ILS", label: "אקסלנס נאסד\"ק (1159243)", flag: "💻", ticker: "1159243.TA", source: md.nasdaq.priceSource || "Firestore (scanner)" } : null,
+      SP500:  md.sp500?.price  != null ? { price: md.sp500.price,  currency: "ILS", label: "אקסלנס S&P 500 (1183441)", flag: "🇺🇸", ticker: "1183441.TA", source: md.sp500.priceSource  || "Firestore (scanner)", isFallback: !!md.sp500.isFallback,  fallbackSource: md.sp500.fallbackSource  || null } : null,
+      NASDAQ: md.nasdaq?.price != null ? { price: md.nasdaq.price, currency: "ILS", label: "אקסלנס נאסד\"ק (1159243)", flag: "💻", ticker: "1159243.TA", source: md.nasdaq.priceSource || "Firestore (scanner)", isFallback: !!md.nasdaq.isFallback, fallbackSource: md.nasdaq.fallbackSource || null } : null,
       FX:     fxRate           != null ? { price: fxRate,          currency: "FX",  label: "USD/ILS",                  flag: "💱", ticker: "ILS=X",      source: md.fx.source          || "Firestore (scanner)" } : null,
     };
   }, []);
@@ -2981,12 +2981,12 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
 //  Long Term: פסיביים (S&P 500, Nasdaq, Bitcoin) · NAV חי + תשואה מצטברת
 //  Trade Journal: יומן מסחר אקטיבי עם עריכה inline + שמירה מיידית ב-Firestore
 // ══════════════════════════════════════════════════════════════
-// V2.8.0: priceUnit:"agora" → Yahoo Finance מחזיר ניירות ישראליים ב-אגורות (÷100 לקבל ₪)
+// V2.8.2: priceUnit:"ils"  → הסורק ממיר אגורות ל-₪ לפני שמירה ב-Firestore (tasePriceILS)
 //         priceUnit:"usd"  → IBIT, avgEntry מוזן בדולרים, P&L מוצג בדולרים
 const EXCELLENCE_LONG_TEMPLATE = [
-  { id:"sp500",   label:"S&P 500",   ticker:"SP500",  currency:"ILS", priceUnit:"agora", color:"#22c55e", liveKey:"SP500",  note:"תל-אביב 1183441 · מחיר Yahoo ב-אגורות ÷100=₪" },
-  { id:"nasdaq",  label:"Nasdaq",    ticker:"NASDAQ", currency:"ILS", priceUnit:"agora", color:"#3b82f6", liveKey:"NASDAQ", note:"תל-אביב 1159243 · מחיר Yahoo ב-אגורות ÷100=₪" },
-  { id:"bitcoin", label:"Bitcoin",   ticker:"IBIT",   currency:"USD", priceUnit:"usd",   color:"#f59e0b", liveKey:"IBIT",   note:"iShares Bitcoin Trust ETF · avgEntry ב-$" },
+  { id:"sp500",   label:"S&P 500",   ticker:"SP500",  currency:"ILS", priceUnit:"ils", color:"#22c55e", liveKey:"SP500",  note:"תל-אביב 1183441 · הסורק שומר ב-₪ (tasePriceILS)" },
+  { id:"nasdaq",  label:"Nasdaq",    ticker:"NASDAQ", currency:"ILS", priceUnit:"ils", color:"#3b82f6", liveKey:"NASDAQ", note:"תל-אביב 1159243 · הסורק שומר ב-₪ (tasePriceILS)" },
+  { id:"bitcoin", label:"Bitcoin",   ticker:"IBIT",   currency:"USD", priceUnit:"usd", color:"#f59e0b", liveKey:"IBIT",   note:"iShares Bitcoin Trust ETF · avgEntry ב-$" },
 ];
 
 /** Long-Term allocation (all zero by default — user will provide data later) */
@@ -3011,19 +3011,23 @@ const computePnL = (row) => {
   return +((x - e) * q).toFixed(2);
 };
 
-// V2.8.0 — ExcellenceLongRow: תיקון אגורות + IBIT ב-USD
-// priceUnit="agora" → Yahoo Finance מחזיר ניירות ישראליים ב-אגורות → ÷100 לשקלים
-// priceUnit="usd"   → IBIT: avgEntry בדולרים, P&L מוצג בדולרים
+// V2.8.2 — ExcellenceLongRow: הסורק שומר ב-₪ (tasePriceILS) — אין ÷100 לישראלים
+// priceUnit="ils" → הסורק כבר המיר אגורות ל-₪ → rawPrice הוא ₪ ישירות
+// priceUnit="usd" → IBIT: avgEntry בדולרים, P&L מוצג בדולרים
+//   isBadFallback: מגן מפני Yahoo browser שמחזיר ^GSPC×FX (ערך מדד, לא מחיר יחידה)
 const ExcellenceLongRow = ({ holding, live, fx }) => {
   const def      = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === holding.id) || {};
   const fxRate   = fx || 3.6;
-  const rawPrice = live?.price ?? null; // כפי שמגיע מ-Yahoo (אגורות / דולרים / שקלים)
 
-  // ── V2.8.0: נרמול מחיר לפי יחידות ──
+  // V2.8.2: מחיר תקין = (אין fallback) OR (fallback מיום קודם = מחיר ₪ תקין מהסורק)
+  //         מחיר שגוי = fallback מ-^GSPC/^IXIC×FX של Yahoo browser (ערך מדד, לא יחידה)
+  const isBadFallback = live?.isFallback && live?.fallbackSource !== "previous_day";
+  const rawPrice = (!isBadFallback && live?.price != null) ? live.price : null;
+
+  // ── V2.8.2: נרמול מחיר לפי יחידות ──
   const priceILS = rawPrice != null
-    ? (def.priceUnit === "agora" ? rawPrice / 100              // אגורות → שקלים
-     : def.priceUnit === "usd"   ? rawPrice * fxRate           // דולרים → שקלים (לצורך ILS total)
-     :                             rawPrice)                   // כבר בשקלים
+    ? (def.priceUnit === "usd" ? rawPrice * fxRate             // דולרים → שקלים (לצורך ILS total)
+     :                           rawPrice)                     // "ils": הסורק כבר ב-₪ | fallback: ₪ ישירות
     : null;
   const priceUSD = rawPrice != null && def.priceUnit === "usd" ? rawPrice : null; // לדיוור $
   const hasLive  = priceILS != null && holding.qty > 0;
@@ -3056,8 +3060,8 @@ const ExcellenceLongRow = ({ holding, live, fx }) => {
   const borderHover = pnlILS > 0 ? "hover:border-emerald-500/60" : pnlILS < 0 ? "hover:border-rose-500/60" : "hover:border-slate-500/40";
   const borderBase  = pnlILS > 0 ? "border-emerald-800/40" : pnlILS < 0 ? "border-rose-800/40" : "border-slate-700/60";
 
-  // ── תצוגת מחיר שוק (במחיר המנורמל) ──
-  const adjustedPrice = rawPrice != null && def.priceUnit === "agora" ? rawPrice / 100 : rawPrice;
+  // ── תצוגת מחיר שוק (V2.8.2: הסורק כבר ב-₪, אין ÷100) ──
+  const adjustedPrice = rawPrice; // "ils": כבר ₪ | "usd": $ | fallback: ₪
   const currentPriceDisplay = adjustedPrice != null
     ? (def.priceUnit === "usd" ? `$${adjustedPrice}` : `₪${adjustedPrice.toLocaleString("he-IL")}`)
     : "—";
@@ -3162,22 +3166,23 @@ const TradeJournalRow = ({ row, onChange, onDelete }) => {
 const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, liveMarket, fx }) => {
   const fxRate = fx || 3.6;
 
-  // ── V2.8.0: חישוב ערכים לכל אחזקה (תיקון אגורות + IBIT ב-USD) ──
+  // ── V2.8.1: חישוב ערכים לכל אחזקה (תיקון אגורות + IBIT ב-USD + bad-fallback guard) ──
   const enriched = longTerm.map(h => {
-    const def      = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === h.id) || {};
-    const live     = liveMarket[def.liveKey];
-    const rawPrice = live?.price ?? null;
-    // נרמול מחיר: אגורות÷100=₪ / USD×FX=₪
+    const def  = EXCELLENCE_LONG_TEMPLATE.find(t => t.id === h.id) || {};
+    const live = liveMarket[def.liveKey];
+    // V2.8.2: isBadFallback — מגן מפני Yahoo browser שמחזיר ^GSPC×FX (ערך מדד, לא יחידה)
+    const isBadFallback = live?.isFallback && live?.fallbackSource !== "previous_day";
+    const rawPrice = (!isBadFallback && live?.price != null) ? live.price : null;
+    // V2.8.2: הסורק שומר ב-₪ (tasePriceILS) — priceUnit:"ils" = ₪ ישירות (אין ÷100)
     const priceILS = rawPrice != null
-      ? (def.priceUnit === "agora" ? rawPrice / 100
-       : def.priceUnit === "usd"   ? rawPrice * fxRate
-       :                             rawPrice)
+      ? (def.priceUnit === "usd" ? rawPrice * fxRate            // IBIT: $ → ₪
+       :                           rawPrice)                    // "ils": הסורק כבר ב-₪
       : null;
     let marketValueILS = 0;
     if (priceILS != null && h.qty > 0) {
       marketValueILS = priceILS * h.qty;
     } else {
-      marketValueILS = h.investedILS || 0;
+      marketValueILS = h.investedILS || 0; // fallback לעלות הבסיס
     }
     return { ...h, def, live, priceILS, marketValueILS, invested: h.investedILS || 0 };
   });
@@ -3209,7 +3214,7 @@ const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, l
   const deleteTradeRow  = (id)       => setTradeJournal(prev => prev.filter(r => r.id !== id));
   // V2.8.0: כשמשנים qty או avgEntry, מחשבים investedILS אוטומטית
   // IBIT (priceUnit:"usd"): investedILS = qty × avgEntry(USD) × fxRate
-  // ניירות ישראליים (priceUnit:"agora"): investedILS = qty × avgEntry(₪)
+  // ניירות ישראליים (priceUnit:"ils"): investedILS = qty × avgEntry(₪) — avgEntry מוזן ב-₪
   const updateHolding = (id, field, value) =>
     setLongTerm(prev => prev.map(h => {
       if (h.id !== id) return h;

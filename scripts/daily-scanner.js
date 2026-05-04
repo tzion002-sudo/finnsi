@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Daily Scanner  –  V2.8.0
+//  HaMatzpan · Daily Scanner  –  V2.8.2
 //  Precision Focus: MSTR · MSTY · IBIT · Excellence 1183441/1159243 · FX
 //
 //  V2.8.0:
@@ -57,6 +57,109 @@ function httpsRequest(url, options = {}, body = null) {
     if (body) req.write(JSON.stringify(body));
     req.end();
   });
+}
+
+// ── TASE (Israeli ETF) price — V2.8.3: 4 מקורות במדרג עדיפות ─────────────────
+// מחזיר מחיר ב-ILS (שקלים) — הסורק ממיר אגורות לפני שמירה ב-Firestore
+// מקורות: 1) Yahoo .TA  2) investing.com (HTML scrape, אגורות)  3) Stooq.com  4) Bizportal API
+//
+// investing.com instrument IDs (נבדק ומוודא):
+//   1183441 (S&P 500)  → id=1185483, url=/etfs/s---p-500-source?cid=1185483
+//   1159243 (NASDAQ)   → id=1148208, url=/etfs/cs-(ie)-on-nasdaq-100?cid=1148208
+const INVESTING_COM_URLS = {
+  "1183441": "https://www.investing.com/etfs/s---p-500-source?cid=1185483",
+  "1159243": "https://www.investing.com/etfs/cs-(ie)-on-nasdaq-100?cid=1148208",
+};
+
+async function tasePriceILS(shareId, yahooTicker) {
+  const id = String(shareId);
+
+  // ── מקור 1: Yahoo Finance .TA (מחיר ב-אגורות → ÷100 = ₪) ──────────
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooTicker)}?interval=1d&range=2d`;
+    const { body } = await httpsRequest(url, { timeout: 10000 });
+    const meta = body?.chart?.result?.[0]?.meta;
+    const raw  = meta?.regularMarketPrice ?? meta?.postMarketPrice;
+    if (raw != null && raw > 100) { // ניירות ת"א מעל 100 (אגורות)
+      const cur  = parseFloat((raw / 100).toFixed(4)); // ÷100 → ₪
+      const prev = meta.chartPreviousClose ? parseFloat((meta.chartPreviousClose / 100).toFixed(4)) : null;
+      const chg  = prev ? parseFloat(((cur - prev) / prev * 100).toFixed(2)) : null;
+      console.log(`    ✅ Yahoo .TA: ${id} = ₪${cur} (${raw} אגורות)`);
+      return { price: cur, changePct: chg, source: "Yahoo Finance (.TA)", isFallback: false };
+    }
+  } catch {}
+
+  // ── מקור 2: Investing.com — HTML scrape, מחיר ב-אגורות → ÷100 = ₪ ───
+  // נבדק: מחזיר 4,280 ל-1183441 (= ₪42.80) ו-471,100 ל-1159243 (= ₪4,711)
+  const investingUrl = INVESTING_COM_URLS[id];
+  if (investingUrl) {
+    try {
+      const { status, body: html } = await httpsRequest(investingUrl, {
+        timeout: 15000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (status === 200 && typeof html === "string") {
+        // מחפש: instrument-price-last">4,280</  (מחיר ב-אגורות)
+        const m = html.match(/instrument-price-last[^>]*>([\d,\.]+)</);
+        if (m) {
+          const raw  = parseFloat(m[1].replace(/,/g, ""));
+          if (!isNaN(raw) && raw > 100) {             // ודא שמחיר ב-אגורות (> 100)
+            const cur = parseFloat((raw / 100).toFixed(4)); // אגורות → ₪
+            console.log(`    ✅ Investing.com: ${id} = ₪${cur} (${raw} אגורות)`);
+            return { price: cur, changePct: null, source: "Investing.com (TASE)", isFallback: false };
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // ── מקור 3: Stooq.com — CSV, מחיר ב-ILS ישירות ──────────────────────
+  try {
+    const url = `https://stooq.com/q/l/?s=${id}.il&f=sd2t2ohlcv&h&e=csv`;
+    const { status, body } = await httpsRequest(url, {
+      timeout: 10000,
+      headers: { "User-Agent": "Mozilla/5.0" }
+    });
+    if (status === 200 && typeof body === "string") {
+      const lines = body.trim().split('\n');
+      if (lines.length >= 2) {
+        const vals = lines[1].split(',');
+        const close = parseFloat(vals[6]); // Close
+        const open  = parseFloat(vals[3]); // Open
+        if (!isNaN(close) && close > 0 && close < 10000) { // sanity: ₪ לא אגורות
+          const chg = open > 0 ? parseFloat(((close - open) / open * 100).toFixed(2)) : null;
+          console.log(`    ✅ Stooq.com: ${id} = ₪${close}`);
+          return { price: close, changePct: chg, source: "Stooq.com", isFallback: false };
+        }
+      }
+    }
+  } catch {}
+
+  // ── מקור 4: Bizportal.co.il — API ישראלי ────────────────────────────
+  try {
+    const url = `https://api.bizportal.co.il/biz/GetTickerData?type=2&paperId=${id}`;
+    const { status, body } = await httpsRequest(url, {
+      timeout: 10000,
+      headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://www.bizportal.co.il/" }
+    });
+    if (status === 200 && body) {
+      const priceRaw = body?.Data?.CurrentPrice || body?.currentPrice || body?.price;
+      if (priceRaw) {
+        const price = parseFloat(priceRaw);
+        if (price > 0) {
+          console.log(`    ✅ Bizportal: ${id} = ₪${price}`);
+          return { price, changePct: null, source: "Bizportal.co.il", isFallback: false };
+        }
+      }
+    }
+  } catch {}
+
+  console.log(`    ⚠ ${id}: כל המקורות נכשלו — יוצג מחיר יום קודם`);
+  return { price: null, changePct: null, source: "unavailable", isFallback: false };
 }
 
 // ── Yahoo Finance — price fetch ───────────────────────────────
@@ -339,33 +442,30 @@ function buildSummary(msty, mstr, fx, sp500) {
     yahooPrice("ILS=X"),
   ]);
 
-  // ══ שלב 2: ניירות אקסלנס ת"א (עם fallback + המרה לשקל) ═══
-  console.log("\n📡 שולף ניירות אקסלנס ת\"א (1183441 · 1159243)...");
+  // ══ שלב 2: ניירות אקסלנס ת"א — V2.8.3: 4 מקורות (Yahoo→Investing.com→Stooq→Bizportal) ═
+  // מחיר נשמר ב-Firestore ב-ILS (לא אגורות!) — האפליקציה משתמשת ישירות ב-₪
+  console.log("\n📡 V2.8.3 — שולף ניירות TASE: 1183441 (S&P) · 1159243 (NASDAQ)...");
   const [rawSp500, rawNasdaq] = await Promise.all([
-    yahooPrice("1183441.TA", "^GSPC"),
-    yahooPrice("1159243.TA", "^IXIC"),
+    tasePriceILS(1183441, "1183441.TA"),  // Invesco S&P 500 TASE
+    tasePriceILS(1159243, "1159243.TA"),  // iShares NASDAQ 100 TASE
   ]);
 
-  // V2.5.2: אם ה-.TA חסום והשתמשנו ב-fallback US → נכפל ב-FX לקבל שקלים
-  const applyFxConversion = (raw, fxRate) => {
-    if (!raw.isFallback || raw.currency === "ILS" || !fxRate) return raw;
-    const ilsPrice = raw.price != null ? parseFloat((raw.price * fxRate).toFixed(2)) : null;
-    return { ...raw, price: ilsPrice, currency: "ILS",
-             source: `${raw.source} × FX₪ (${raw.fallbackTicker})` };
+  // לוג מחירים — core assets
+  const p = (o, label, sym) => console.log(`  ${label.padEnd(8)} ${o.price != null ? `${sym}${o.price} (${o.changePct != null ? (o.changePct >= 0 ? "+" : "") + o.changePct + "%" : "—"})` : "לא זמין"}`);
+  p(msty, "MSTY", "$"); p(mstr, "MSTR", "$"); p(ibit, "IBIT", "$"); p(fx, "FX", "₪");
+
+  // V2.8.3: לוג מחירים TASE — מחיר כבר ב-₪ (tasePriceILS המיר אגורות)
+  const pTA = (o, label) => {
+    if (o.price != null) console.log(`  ${label.padEnd(8)} ₪${o.price} (${o.source})`);
+    else                 console.log(`  ${label.padEnd(8)} לא זמין`);
   };
-  const sp500  = applyFxConversion(rawSp500,  fx.price);
-  const nasdaq = applyFxConversion(rawNasdaq, fx.price);
+  pTA(rawSp500,  "1183441"); pTA(rawNasdaq, "1159243");
 
-  // לוג מחירים
-  const p = (o, label, sym) => console.log(`  ${label.padEnd(8)} ${o.price != null ? `${sym}${o.price} (${o.changePct != null ? (o.changePct >= 0 ? "+" : "") + o.changePct + "%" : "—"}) ${o.isFallback ? `[fallback: ${o.fallbackTicker}]` : ""}` : "לא זמין"}`);
-  p(msty,   "MSTY",   "$"); p(mstr,   "MSTR",   "$"); p(ibit,   "IBIT",   "$");
-  p(fx,     "FX",     "₪"); p(sp500,  "S&P500", "₪"); p(nasdaq, "NASDAQ", "₪");
-
-  if (!msty.price)   warnings.push("MSTY: לא זמין");
-  if (!mstr.price)   warnings.push("MSTR: לא זמין");
-  if (!fx.price)     warnings.push("USD/ILS: לא זמין");
-  if (!sp500.price)  warnings.push("נייר 1183441 (S&P500 אקסלנס): חסום" + (sp500.isFallback ? " → נעשה שימוש ב-^GSPC×FX" : ""));
-  if (!nasdaq.price) warnings.push("נייר 1159243 (נאסד\"ק אקסלנס): חסום" + (nasdaq.isFallback ? " → נעשה שימוש ב-^IXIC×FX" : ""));
+  if (!msty.price)       warnings.push("MSTY: לא זמין");
+  if (!mstr.price)       warnings.push("MSTR: לא זמין");
+  if (!fx.price)         warnings.push("USD/ILS: לא זמין");
+  if (!rawSp500.price)   warnings.push("נייר 1183441 (S&P500 אקסלנס): חסום — יוצג מחיר יום קודם");
+  if (!rawNasdaq.price)  warnings.push("נייר 1159243 (נאסד\"ק אקסלנס): חסום — יוצג מחיר יום קודם");
 
   // ══ שלב 3: דיבידנד MSTY (V2.7.0: yieldmaxetfs.com ראשוני, Yahoo fallback) ══
   console.log("\n📅 שולף דיבידנדי MSTY מ-yieldmaxetfs.com (מקור ראשוני)...");
@@ -418,19 +518,40 @@ function buildSummary(msty, mstr, fx, sp500) {
     }
   } catch (e) { console.warn("  ⚠ שגיאה בקריאת נכס MSTY:", e.message); }
 
-  // ══ שלב 5: היסטוריה — יומי לעומת אתמול ═══════════════════
+  // ══ שלב 5: היסטוריה — יומי לעומת אתמול + fallback לניירות TASE ═══════════════════
   console.log(`\n📊 שולף היסטוריה (${YESTERDAY})...`);
   const yesterday = await fsRead("market_history", YESTERDAY);
   if (yesterday) console.log("  ✅ נתוני אתמול נטענו");
-  else console.log("  ℹ אין היסטוריה אתמול (ראשון פעם)");
+  else           console.log("  ℹ אין היסטוריה אתמול (ראשון פעם)");
+
+  // V2.8.2: fallback — נתוני יום קודם ב-ILS (כבר מומרים, לא אגורות)
+  const sp500_prevPrice  = yesterday?.sp500?.price  ?? null; // כבר ILS
+  const nasdaq_prevPrice = yesterday?.nasdaq?.price ?? null; // כבר ILS
+
+  const sp500 = rawSp500.price != null ? rawSp500 : {
+    price: sp500_prevPrice, changePct: null, currency: "ILS",
+    source: sp500_prevPrice ? `יום קודם (${YESTERDAY})` : "unavailable",
+    isFallback: !!sp500_prevPrice, fallbackSource: "previous_day",
+  };
+  const nasdaq = rawNasdaq.price != null ? rawNasdaq : {
+    price: nasdaq_prevPrice, changePct: null, currency: "ILS",
+    source: nasdaq_prevPrice ? `יום קודם (${YESTERDAY})` : "unavailable",
+    isFallback: !!nasdaq_prevPrice, fallbackSource: "previous_day",
+  };
+
+  if (rawSp500.price  == null && sp500_prevPrice)  console.log(`  📋 S&P500: fallback לנתוני ${YESTERDAY} — ₪${sp500_prevPrice.toFixed(2)}`);
+  if (rawNasdaq.price == null && nasdaq_prevPrice) console.log(`  📋 NASDAQ: fallback לנתוני ${YESTERDAY} — ₪${nasdaq_prevPrice.toFixed(2)}`);
+  if (rawSp500.price  == null && !sp500_prevPrice)  console.log("  ⚠ S&P500: אין נתונים בכלל — יוצג עלות בסיס");
+  if (rawNasdaq.price == null && !nasdaq_prevPrice) console.log("  ⚠ NASDAQ: אין נתונים בכלל — יוצג עלות בסיס");
 
   const dailyChg = {
     msty:   calcDailyChange(msty.price,   yesterday?.msty?.price)   ?? msty.changePct,
     mstr:   calcDailyChange(mstr.price,   yesterday?.mstr?.price)   ?? mstr.changePct,
     ibit:   calcDailyChange(ibit.price,   yesterday?.ibit?.price)   ?? ibit.changePct,
     fx:     calcDailyChange(fx.price,     yesterday?.fx?.usdIls)    ?? fx.changePct,
-    sp500:  calcDailyChange(sp500.price,  yesterday?.sp500?.price)  ?? sp500.changePct,
-    nasdaq: calcDailyChange(nasdaq.price, yesterday?.nasdaq?.price) ?? nasdaq.changePct,
+    // sp500/nasdaq: שינוי יומי רק אם יש מחיר חי (fallback = null כי אין שינוי)
+    sp500:  rawSp500.price  != null ? (calcDailyChange(sp500.price,  yesterday?.sp500?.price)  ?? sp500.changePct) : null,
+    nasdaq: rawNasdaq.price != null ? (calcDailyChange(nasdaq.price, yesterday?.nasdaq?.price) ?? nasdaq.changePct) : null,
   };
 
   // ══ שלב 6: V2.8.0 — חדשות רלוונטיות: MSTY · MSTR · YieldMax ══
@@ -501,22 +622,26 @@ function buildSummary(msty, mstr, fx, sp500) {
       priceSource:    ibit.source,
       currency:       "USD",
     },
-    // V2.5.2: Excellence papers — ILS (כולל המרה אם היה fallback)
+    // V2.8.2: Excellence papers — מחיר ב-₪ (ILS) — tasePriceILS כבר המיר אגורות!
+    // isFallback:true + fallbackSource:"previous_day" = מחיר יום קודם ב-₪ (תקין)
+    // isFallback:false                                = מחיר חי ב-₪ מהבורסה
     sp500: {
-      price:          sp500.price,
+      price:          sp500.price,         // ₪ (ILS) — tasePriceILS המיר אגורות÷100
       changePct:      sp500.changePct,
       dailyChangePct: dailyChg.sp500,
       priceSource:    sp500.source,
       paperCode:      "01183441",
-      isFallback:     sp500.isFallback,
+      isFallback:     !!sp500.isFallback,
+      fallbackSource: sp500.fallbackSource || null,  // "previous_day" | null
     },
     nasdaq: {
-      price:          nasdaq.price,
+      price:          nasdaq.price,        // ₪ (ILS) — tasePriceILS המיר אגורות÷100
       changePct:      nasdaq.changePct,
       dailyChangePct: dailyChg.nasdaq,
       priceSource:    nasdaq.source,
       paperCode:      "01159243",
-      isFallback:     nasdaq.isFallback,
+      isFallback:     !!nasdaq.isFallback,
+      fallbackSource: nasdaq.fallbackSource || null,
     },
     fx: {
       usdIls:         fx.price,
