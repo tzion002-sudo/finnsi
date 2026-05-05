@@ -2302,7 +2302,7 @@ const GOLDEN_SOURCES_NOTE = "מקורות מאושרים: מחירים מ-Tradin
 
 const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
   if (!brief) return null;
-  const { date, timestamp, msty, mstr, fx, pension, studyFunds, news, warnings } = brief;
+  const { date, timestamp, msty, mstr, fx, pension, studyFunds, news, warnings, _isStale } = brief;
   const whenStr = timestamp ? new Date(timestamp).toLocaleString("he-IL", { dateStyle: "full", timeStyle: "short" }) : date;
   return (
     <div className="fixed inset-0 z-[70] bg-slate-950/80 backdrop-blur-md flex items-start justify-center p-4 pt-8 overflow-y-auto">
@@ -2310,6 +2310,13 @@ const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
         className="relative bg-gradient-to-br from-indigo-950 via-slate-900 to-purple-950 border-2 border-indigo-500/60 rounded-2xl p-6 shadow-2xl shadow-indigo-500/40 max-w-2xl w-full animate-in fade-in slide-in-from-top duration-500"
         onClick={e => e.stopPropagation()}
       >
+        {/* V2.8.4: באנר נתונים ישנים */}
+        {_isStale && (
+          <div className="mb-3 flex items-center gap-2 bg-amber-900/40 border border-amber-600/50 rounded-lg px-3 py-2 text-xs text-amber-300">
+            <span>⚠️</span>
+            <span>הסורק לא הריץ היום — מוצגים נתונים מ-{date} (הסריקה האחרונה הזמינה)</span>
+          </div>
+        )}
         {/* כותרת */}
         <div className="flex items-start gap-3 mb-4">
           <div className="flex-shrink-0 w-14 h-14 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shadow-lg shadow-amber-500/40">
@@ -3806,18 +3813,23 @@ export default function HaMatzpanGemelnet() {
         });
       }
 
-      // הצגת המודל — V2.8.0: ack חכם לפי תוכן (לא רק תאריך)
-      // מפתח כולל: תאריך סריקה + ex-date של הדיבידנד האחרון + מחיר MSTY (לזיהוי שינוי)
+      // הצגת המודל — V2.8.4: ack כולל תאריך הצפייה (viewDate) + תוכן הסריקה
+      // viewDate = היום — מבטיח שהמודל יוצג פעם אחת בכל יום גם אם הסריקה מיום קודם
+      // scanDate = data.date — לזיהוי שינוי תוכן (פעמיים אותו יום)
+      const viewDate   = new Date().toISOString().slice(0, 10); // תאריך היום
       const divExDate  = data.msty?.nextDividend?.exDate || "none";
       const mstyPriceKey = data.msty?.price != null ? Math.round(data.msty.price * 10) : "X"; // precision 0.1
-      const ackKey = `morning_ack_${data.date}_d${divExDate}_p${mstyPriceKey}`;
+      const ackKey = `morning_ack_v${viewDate}_s${data.date}_d${divExDate}_p${mstyPriceKey}`;
       if (lsLoad(ackKey, false)) {
-        // נתון כבר ראינו — עדכן מחיר ושער בשקט ללא מודל
+        // נתון כבר ראינו היום — עדכן מחיר ושער בשקט ללא מודל
         if (data.msty?.price != null) setMstyPrice(data.msty.price);
         if (data.fx?.usdIls  != null) setMstyFX(data.fx.usdIls);
         return;
       }
-      setMorningBrief({ ...data, _ackKey: ackKey });
+      // V2.8.4: אם נתון הסריקה ישן (לא היום ולא אתמול) — הצג עם אינדיקציה
+      const scanDate = data.date || "";
+      const isStale  = scanDate < viewDate; // הסריקה לא מהיום
+      setMorningBrief({ ...data, _ackKey: ackKey, _isStale: isStale });
     };
 
     // Firestore: real-time subscription ל-market_data/latest
