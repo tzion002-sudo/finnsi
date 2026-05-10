@@ -17,7 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.8.0
+//  "המצפן" – HaMatzpan V2.9.0
+//  V2.9.0 — FIRE Calculator tab · Monthly dividend income in morning brief · IB Flex Query · WhatsApp weekly summary
 //  V2.8.0 — Morning Brief smart ack · No duplicate divs · Agora÷100 fix · IBIT USD P&L · GitHub Actions · News Hebrew labels
 //  V2.7.2 — ROOT CAUSE FIX: Firestore DB named "default" (not "(default)")
 //  V2.7.1 — Critical Save Fix · Dividends All-April · Excellence Auto-Calc
@@ -31,7 +32,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.8.0";
+const APP_VERSION = "V2.9.0";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2300,7 +2301,7 @@ const translateWarning = (w) => {
 
 const GOLDEN_SOURCES_NOTE = "מקורות מאושרים: מחירים מ-TradingView / Yahoo Finance · מט\"ח מ-Investing.com / בנק ישראל · דיבידנד מ-YieldMaxETFs.com בלבד";
 
-const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
+const MorningBriefModal = ({ brief, onApply, onDismiss, monthlyDivIncome }) => {
   if (!brief) return null;
   const { date, timestamp, msty, mstr, fx, pension, studyFunds, news, warnings, _isStale } = brief;
   const whenStr = timestamp ? new Date(timestamp).toLocaleString("he-IL", { dateStyle: "full", timeStyle: "short" }) : date;
@@ -2378,6 +2379,29 @@ const MorningBriefModal = ({ brief, onApply, onDismiss }) => {
             </div>
           )}
         </div>
+
+        {/* V2.9.0 — הכנסה דיבידנד חודשית (החודש הנוכחי) */}
+        {monthlyDivIncome != null && monthlyDivIncome > 0 && (
+          <div className="bg-emerald-950/40 border border-emerald-700/50 rounded-lg p-3 mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">💸</span>
+              <div>
+                <div className="text-[10px] text-emerald-400 font-semibold uppercase tracking-wide">הכנסת דיבידנד החודש</div>
+                <div className="text-[10px] text-slate-400 mt-0.5">{new Date().toLocaleString("he-IL",{month:"long",year:"numeric"})}</div>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-xl font-mono font-bold text-emerald-300">
+                ₪{monthlyDivIncome.toLocaleString("he-IL", {maximumFractionDigits:0})}
+              </div>
+              {fx?.usdIls && (
+                <div className="text-[9px] text-slate-500 mt-0.5">
+                  ≈ ${(monthlyDivIncome / fx.usdIls).toLocaleString("en-US",{maximumFractionDigits:0})}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* דיבידנד הבא (צפי) */}
         {msty?.nextDividend && (msty.nextDividend.amount != null || msty.nextDividend.exDate) && (
@@ -3169,6 +3193,224 @@ const TradeJournalRow = ({ row, onChange, onDelete }) => {
   );
 };
 
+// ══════════════════════════════════════════════════════════════
+//  FireTab — V2.9.0 · מחשבון FIRE (Financial Independence, Retire Early)
+//  חישוב יעד הכנסה פסיבית ממניות MSTY · סימולטור קנייה · תרחישי סיכון
+// ══════════════════════════════════════════════════════════════
+const FireTab = ({ mstyAsset, mstyDividends, mstyPrice, fx, fireTarget, setFireTarget, onFireTargetSave }) => {
+  const sharesCount  = mstyAsset?.sharesCount || 0;
+  const fxRate       = fx || 3.6;
+  const currentPrice = mstyPrice || MSTY_DEFAULTS.currentPrice;
+
+  // דיבידנד ממוצע של 4 חלוקות אחרונות (post-split)
+  const recentPost = (mstyDividends || [])
+    .filter(d => d.shareBasis === "post" && !d.status?.includes("estimate"))
+    .sort((a,b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 4);
+  const avgDiv = recentPost.length > 0
+    ? recentPost.reduce((s,d) => s + d.amount, 0) / recentPost.length
+    : 0.55;
+
+  // הכנסה חודשית נוכחית (4.33 שבועות × דיבידנד ממוצע × מניות × FX)
+  const monthlyIncomeUSD = sharesCount * avgDiv * 4.33;
+  const monthlyIncomeILS = monthlyIncomeUSD * fxRate;
+
+  // יעד וחישוב חסר
+  const [localTarget, setLocalTarget] = React.useState(fireTarget?.toString() || "");
+  const targetILS = parseFloat(localTarget) || 0;
+  const targetUSD = targetILS / fxRate;
+  const sharesNeeded = avgDiv > 0
+    ? Math.max(0, Math.ceil(targetUSD / (avgDiv * 4.33)) - sharesCount)
+    : 0;
+  const investmentNeeded = sharesNeeded * currentPrice;
+
+  // סימולטור: כמה מניות קונים לחודש?
+  const [buyPerMonth, setBuyPerMonth] = React.useState(50);
+  const monthsToFire = sharesNeeded > 0 && buyPerMonth > 0
+    ? Math.ceil(sharesNeeded / buyPerMonth)
+    : 0;
+  const fireDate = monthsToFire > 0
+    ? new Date(Date.now() + monthsToFire * 30 * 24 * 3600 * 1000)
+        .toLocaleDateString("he-IL", {month:"long", year:"numeric"})
+    : null;
+
+  // תרחישי סיכון
+  const [riskPrice, setRiskPrice] = React.useState(currentPrice > 0 ? Math.round(currentPrice * 0.8 * 10) / 10 : 20);
+  const [riskDiv,   setRiskDiv]   = React.useState(Math.round(avgDiv * 0.8 * 1000) / 1000);
+  const riskIncomeILS = sharesCount * (parseFloat(riskDiv) || avgDiv) * 4.33 * fxRate;
+
+  const fmt = (n, d=0) => Number(n).toLocaleString("he-IL", {maximumFractionDigits:d});
+
+  return (
+    <div className="space-y-4 max-w-2xl mx-auto" dir="rtl">
+      {/* כותרת */}
+      <div className="flex items-center gap-3 mb-2">
+        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center shadow-lg">
+          <span className="text-xl">🎯</span>
+        </div>
+        <div>
+          <h2 className="text-xl font-bold text-white">מחשבון FIRE</h2>
+          <p className="text-xs text-slate-400">Financial Independence · מבוסס MSTY</p>
+        </div>
+      </div>
+
+      {/* מצב נוכחי */}
+      <div className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4">
+        <h3 className="text-sm font-bold text-slate-200 mb-3 flex items-center gap-1.5">
+          <span>📊</span> מצב נוכחי
+        </h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="bg-slate-900/60 rounded-lg p-3 text-center">
+            <div className="text-xs text-slate-400 mb-1">מניות MSTY</div>
+            <div className="text-lg font-mono font-bold text-white">{fmt(sharesCount)}</div>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-3 text-center">
+            <div className="text-xs text-slate-400 mb-1">דיב׳ ממוצע</div>
+            <div className="text-lg font-mono font-bold text-amber-300">${fmt(avgDiv,3)}</div>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-3 text-center">
+            <div className="text-xs text-slate-400 mb-1">הכנסה/חודש</div>
+            <div className="text-lg font-mono font-bold text-emerald-300">₪{fmt(monthlyIncomeILS)}</div>
+          </div>
+          <div className="bg-slate-900/60 rounded-lg p-3 text-center">
+            <div className="text-xs text-slate-400 mb-1">שע׳ דולר</div>
+            <div className="text-lg font-mono font-bold text-violet-300">₪{fxRate}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* יעד FIRE */}
+      <div className="bg-slate-800/60 border border-amber-700/30 rounded-xl p-4">
+        <h3 className="text-sm font-bold text-amber-200 mb-3 flex items-center gap-1.5">
+          <span>🏁</span> יעד הכנסה חודשית
+        </h3>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="flex items-center gap-2 bg-slate-900/60 border border-amber-600/40 rounded-lg px-3 py-2 flex-1">
+            <span className="text-amber-300 text-sm font-bold">₪</span>
+            <input
+              type="number"
+              value={localTarget}
+              onChange={e => setLocalTarget(e.target.value)}
+              onBlur={() => {
+                const v = parseFloat(localTarget);
+                if (!isNaN(v) && v > 0) { setFireTarget(v); onFireTargetSave?.(v); }
+              }}
+              placeholder="הזן יעד חודשי..."
+              className="bg-transparent flex-1 text-amber-100 font-mono text-lg outline-none placeholder:text-slate-600"
+            />
+          </div>
+          <div className="text-xs text-slate-500">≈ ${fmt(targetUSD)}/חודש</div>
+        </div>
+        {targetILS > 0 && (
+          <div className={`rounded-lg p-3 border ${monthlyIncomeILS >= targetILS ? "bg-emerald-900/30 border-emerald-600/40" : "bg-slate-900/60 border-slate-700/40"}`}>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-300">
+                {monthlyIncomeILS >= targetILS
+                  ? "✅ הגעת ליעד! ₪" + fmt(monthlyIncomeILS - targetILS) + " מעל"
+                  : `חסר: ₪${fmt(targetILS - monthlyIncomeILS)}/חודש`}
+              </span>
+              {sharesNeeded > 0 && (
+                <span className="text-xs text-amber-300 font-mono font-bold">
+                  = {fmt(sharesNeeded)} מניות · ${fmt(investmentNeeded)}
+                </span>
+              )}
+            </div>
+            {/* Progress bar */}
+            {targetILS > 0 && (
+              <div className="mt-2 bg-slate-700/50 rounded-full h-2">
+                <div
+                  className={`h-2 rounded-full transition-all ${monthlyIncomeILS >= targetILS ? "bg-emerald-400" : "bg-amber-400"}`}
+                  style={{width: `${Math.min(100, (monthlyIncomeILS / targetILS) * 100).toFixed(1)}%`}}
+                />
+              </div>
+            )}
+            <div className="text-[10px] text-slate-500 mt-1">
+              {Math.min(100, (monthlyIncomeILS / targetILS) * 100).toFixed(1)}% מהיעד
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* סימולטור קנייה */}
+      {targetILS > 0 && sharesNeeded > 0 && (
+        <div className="bg-slate-800/60 border border-cyan-700/30 rounded-xl p-4">
+          <h3 className="text-sm font-bold text-cyan-200 mb-3 flex items-center gap-1.5">
+            <span>🚀</span> סימולטור קנייה חודשית
+          </h3>
+          <div className="flex items-center gap-3 mb-3">
+            <label className="text-xs text-slate-400 whitespace-nowrap">מניות לחודש:</label>
+            <input
+              type="number"
+              value={buyPerMonth}
+              onChange={e => setBuyPerMonth(Math.max(1, parseInt(e.target.value) || 1))}
+              className="bg-slate-900/60 border border-cyan-700/40 rounded-lg px-3 py-1.5 text-cyan-100 font-mono text-sm w-24 outline-none"
+              min="1"
+            />
+            <div className="text-xs text-slate-500">× ${fmt(currentPrice)} ≈ ${fmt(buyPerMonth * currentPrice)}/חודש</div>
+          </div>
+          {monthsToFire > 0 && (
+            <div className="bg-cyan-900/20 border border-cyan-700/30 rounded-lg p-3">
+              <div className="flex items-center gap-2 text-cyan-100 font-bold text-sm">
+                <span>🗓️</span>
+                אגיע ליעד בעוד <span className="text-cyan-300 font-mono text-lg mx-1">{monthsToFire}</span> חודשים
+                {fireDate && <span className="text-slate-400 font-normal text-xs">({fireDate})</span>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* תרחישי סיכון */}
+      <div className="bg-slate-800/60 border border-rose-700/30 rounded-xl p-4">
+        <h3 className="text-sm font-bold text-rose-200 mb-3 flex items-center gap-1.5">
+          <span>⚠️</span> תרחישי סיכון
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs text-slate-400">אם מחיר MSTY ירד ל-$</label>
+            <input
+              type="number"
+              value={riskPrice}
+              onChange={e => setRiskPrice(e.target.value)}
+              className="bg-slate-900/60 border border-rose-700/40 rounded-lg px-3 py-1.5 text-rose-100 font-mono text-sm w-full mt-1 outline-none"
+              step="0.5"
+            />
+            <div className="text-[10px] text-slate-500 mt-1">שינוי שווי תיק: ${fmt((parseFloat(riskPrice) - currentPrice) * sharesCount, 0)}</div>
+          </div>
+          <div>
+            <label className="text-xs text-slate-400">אם דיבידנד ירד ל-$</label>
+            <input
+              type="number"
+              value={riskDiv}
+              onChange={e => setRiskDiv(e.target.value)}
+              className="bg-slate-900/60 border border-rose-700/40 rounded-lg px-3 py-1.5 text-rose-100 font-mono text-sm w-full mt-1 outline-none"
+              step="0.01"
+            />
+            <div className="text-[10px] text-slate-500 mt-1">
+              הכנסה חדשה: ₪{fmt(riskIncomeILS)} ({riskIncomeILS > 0 && monthlyIncomeILS > 0 ? ((riskIncomeILS / monthlyIncomeILS - 1) * 100).toFixed(1) : 0}%)
+            </div>
+          </div>
+        </div>
+        <div className="mt-3 bg-rose-950/30 border border-rose-700/30 rounded-lg p-3">
+          <div className="text-xs text-slate-300">
+            בתרחיש זה הכנסה תהיה: <span className="font-mono font-bold text-rose-300 text-sm">₪{fmt(riskIncomeILS)}</span>/חודש
+            {targetILS > 0 && (
+              <span className="text-slate-500 mr-2">
+                ({riskIncomeILS >= targetILS ? "✅ מעל היעד" : `₪${fmt(targetILS - riskIncomeILS)} מתחת ליעד`})
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* פרטים טכניים */}
+      <div className="text-[10px] text-slate-600 text-center">
+        חישוב מבוסס על ממוצע {recentPost.length} דיבידנדים אחרונים · 4.33 שבועות/חודש · שע׳ ₪{fxRate}/$
+      </div>
+    </div>
+  );
+};
+
 // V2.4.0 — ExcellenceTab: Total Equity · Doughnut · Line Chart · כרטיסי מידע מלאים
 const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, liveMarket, fx }) => {
   const fxRate = fx || 3.6;
@@ -3506,6 +3748,8 @@ export default function HaMatzpanGemelnet() {
   // V2.2.0 — Excellence sub-portfolios
   const [excellenceLongTerm, setExcellenceLongTerm] = useState(DEFAULT_EXCELLENCE_LONG);
   const [excellenceTradeJournal, setExcellenceTradeJournal] = useState(DEFAULT_TRADE_JOURNAL);
+  // V2.9.0 — FIRE Calculator target (₪/month)
+  const [fireTarget, setFireTarget] = useState(0);
   // V2.6.0 — Manual save toast
   const [manualSaveStatus, setManualSaveStatus] = useState("idle"); // idle|saving|saved|error
   // V2.1.9 — Cloud Sync status
@@ -3614,6 +3858,7 @@ export default function HaMatzpanGemelnet() {
           if (typeof s.mstyFX === "number")            setMstyFX(s.mstyFX);
           if (Array.isArray(s.excellenceLongTerm))     setExcellenceLongTerm(s.excellenceLongTerm);
           if (Array.isArray(s.excellenceTradeJournal)) setExcellenceTradeJournal(s.excellenceTradeJournal);
+          if (typeof s.fireTarget === "number" && s.fireTarget > 0) setFireTarget(s.fireTarget);
           // מסמן hydrated רק כשיש נתונים אמיתיים
           settingsHydratedRef.current = true;
           // מבטל timer של משתמש חדש (אם רץ)
@@ -3654,7 +3899,7 @@ export default function HaMatzpanGemelnet() {
   // V2.7.2: עדכן ref תמיד לנתוני settings הנוכחיים (לשמירה מהטיימר של משתמש חדש)
   currentSettingsRef.current = {
     loans, savings, mstyDividends, documents,
-    mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal,
+    mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget,
   };
 
   useEffect(() => {
@@ -3668,12 +3913,12 @@ export default function HaMatzpanGemelnet() {
       saveSettings({
         loans, savings, mstyDividends, documents,
         mstyPrice, mstyFX,      // payload כולל מחירים — אבל לא גורמים ל-trigger
-        excellenceLongTerm, excellenceTradeJournal,
+        excellenceLongTerm, excellenceTradeJournal, fireTarget,
       }).catch(err => console.warn("auto-saveSettings failed:", err));
     }, 800); // הגדלנו ל-800ms כדי לתת זמן ל-cloud update להגיע
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loans, savings, mstyDividends, documents, excellenceLongTerm, excellenceTradeJournal]);
+  }, [loans, savings, mstyDividends, documents, excellenceLongTerm, excellenceTradeJournal, fireTarget]);
 
   // V2.7.1 — שמירת mstyPrice/mstyFX בנפרד (לא חלק מה-debounce הראשי כדי למנוע race)
   // נשמרים רק כשמשתמש/סריקה מעדכנים (לא כשמגיע מ-cloud — cloudUpdateRef מגן)
@@ -3681,7 +3926,7 @@ export default function HaMatzpanGemelnet() {
     if (!settingsHydratedRef.current) return;
     if (cloudUpdateRef.current) return; // cloudUpdateRef יתאפס ב-timeout הראשי
     const t = setTimeout(() => {
-      saveSettings({ loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal })
+      saveSettings({ loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget })
         .catch(err => console.warn("price-save failed:", err));
     }, 800);
     return () => clearTimeout(t);
@@ -3717,7 +3962,7 @@ export default function HaMatzpanGemelnet() {
         loans, savings, mstyDividends,
         documents: safeDocs,
         mstyPrice, mstyFX,
-        excellenceLongTerm, excellenceTradeJournal,
+        excellenceLongTerm, excellenceTradeJournal, fireTarget,
       }), "settings");
 
       // 2) Assets — V2.7.0: batch write (single commit) במקום N קריאות נפרדות
@@ -4225,6 +4470,7 @@ export default function HaMatzpanGemelnet() {
           { key:"loans",       label:"הלוואות",     icon:<CreditCard size={14}/>,      color:"border-rose-500",    badge: loans.length },
           { key:"savings",     label:"חסכונות",     icon:<PiggyBank size={14}/>,       color:"border-teal-500",    badge: savings.length },
           { key:"documents",   label:"מחסן דוחות",  icon:<FileText size={14}/>,        color:"border-sky-500",     badge: documents.length || null },
+          { key:"fire",        label:"🎯 FIRE",      icon:null,                         color:"border-amber-400"  },
         ].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
             className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors whitespace-nowrap ${
@@ -4441,6 +4687,23 @@ export default function HaMatzpanGemelnet() {
         />
       )}
 
+      {/* V2.9.0 — FIRE Calculator */}
+      {tab === "fire" && (
+        <FireTab
+          mstyAsset={assets.find(a => a.isMSTY)}
+          mstyDividends={mstyDividends}
+          mstyPrice={mstyPrice}
+          fx={mstyFX}
+          fireTarget={fireTarget}
+          setFireTarget={setFireTarget}
+          onFireTargetSave={(val) => {
+            setFireTarget(val);
+            saveSettings({ loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget: val })
+              .catch(e => console.warn("fireTarget save failed:", e));
+          }}
+        />
+      )}
+
       {/* V2.7.0 — Missed Scan Banner הוסר (מבלבל; מחירים נטענים אוטומטית מ-Firestore) */}
 
       <footer className="mt-8 p-4 bg-slate-800/30 border border-slate-700/50 rounded-xl text-xs text-slate-400 leading-relaxed">
@@ -4485,6 +4748,20 @@ export default function HaMatzpanGemelnet() {
         brief={morningBrief}
         onApply={applyMorningBrief}
         onDismiss={dismissMorningBrief}
+        monthlyDivIncome={(() => {
+          // V2.9.0: חישוב הכנסת דיבידנד לחודש הנוכחי מהסריקה
+          const currentMonth = new Date().toISOString().slice(0, 7); // "2026-05"
+          const mstyAsset = assets.find(a => a.isMSTY);
+          if (!mstyAsset || !mstyDividends?.length) return null;
+          return mstyDividends
+            .filter(d => d.date?.startsWith(currentMonth) && !d.status?.includes("estimate"))
+            .reduce((sum, d) => {
+              const shares = d.shareBasis === "pre"
+                ? (mstyAsset.originalShares || 590)
+                : (mstyAsset.sharesCount || Math.floor((mstyAsset.originalShares || 590) / (mstyAsset.reverseSplitRatio || 5)));
+              return sum + (d.amount * shares * mstyFX);
+            }, 0) || null;
+        })()}
       />
 
       {/* V2.1.6 · Save-Toast זעיר */}

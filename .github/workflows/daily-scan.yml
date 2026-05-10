@@ -28,9 +28,16 @@ jobs:
       - name: Run Daily Market Scanner
         run: node scripts/daily-scanner.js
         env:
-          # משתני סביבה — כרגע לא נדרשים (API key מוטמע בסורק)
-          # להוסיף כאן אם הסורק יועבר ל-env-based credentials בעתיד
           NODE_ENV: production
+          # V2.9.0 — IBKR Flex Query (אופציונלי — הוסף ב-GitHub Secrets אם רוצה auto-sync)
+          # הגדרה: IBKR Account Management → Reports → Flex Queries
+          IBKR_TOKEN:    ${{ secrets.IBKR_TOKEN }}
+          IBKR_QUERY_ID: ${{ secrets.IBKR_QUERY_ID }}
+          # V2.9.0 — WhatsApp Business Cloud API (אופציונלי — דוח שבועי בכל יום שני)
+          # הגדרה: developers.facebook.com/apps → WhatsApp → Getting Started
+          WHATSAPP_TOKEN:    ${{ secrets.WHATSAPP_TOKEN }}
+          WHATSAPP_PHONE_ID: ${{ secrets.WHATSAPP_PHONE_ID }}
+          WHATSAPP_TO:       ${{ secrets.WHATSAPP_TO }}
 
       - name: Report scan result
         if: always()
