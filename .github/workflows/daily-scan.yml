@@ -34,6 +34,11 @@ jobs:
           WHATSAPP_TOKEN:    ${{ secrets.WHATSAPP_TOKEN }}
           WHATSAPP_PHONE_ID: ${{ secrets.WHATSAPP_PHONE_ID }}
           WHATSAPP_TO:       ${{ secrets.WHATSAPP_TO }}
+          # V2.9.1 — Gmail דוח בוקר יומי (אופציונלי)
+          # הגדרה: myaccount.google.com/apppasswords → צור App Password
+          GMAIL_FROM:         tzion002@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_TO:           ${{ secrets.GMAIL_TO }}
 
       - name: Report scan result
         if: always()

@@ -34,6 +34,11 @@ const WHATSAPP_TOKEN    = process.env.WHATSAPP_TOKEN    || null;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || null;
 const WHATSAPP_TO       = process.env.WHATSAPP_TO       || null;
 
+// V2.9.1 — Gmail דוח בוקר יומי (אופציונלי — דורש GMAIL_APP_PASSWORD + GMAIL_TO)
+const GMAIL_FROM         = process.env.GMAIL_FROM         || "tzion002@gmail.com";
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || null;
+const GMAIL_TO           = process.env.GMAIL_TO           || null;
+
 // ── Firebase config ─────────────────────────────────────────────
 const FIREBASE = {
   projectId: "finnsi-3a75d",
@@ -763,6 +768,22 @@ async function sendWeeklyWhatsApp(summary) {
     });
   }
 
+  // ══ שלב 9: V2.9.1 — Gmail דוח בוקר יומי ══════════════════
+  console.log("\n📧 V2.9.1 — שולח דוח בוקר במייל...");
+  await sendMorningEmail({
+    mstyPrice:    msty.price,
+    mstrPrice:    mstr.price,
+    usdIls:       fx.price,
+    mstyChange:   dailyChg.msty,
+    mstrChange:   dailyChg.mstr,
+    nextDiv:      nextDividend ? { amount: nextDividend.amount, exDate: nextDividend.date } : null,
+    projectedILS: projectedDividend?.netILS ?? null,
+    shares:       projectedDividend?.shares ?? 118,
+    sp500Price:   sp500.price,
+    nasdaqPrice:  nasdaq.price,
+    news:         allNews,
+  });
+
   // ══ סיכום ══════════════════════════════════════════════════
   console.log("\n── סיכום V2.9.0 Precision Focus ─────────────────────────");
   console.log(`  MSTY:      $${msty.price ?? "N/A"}  (יומי: ${dailyChg.msty != null ? (dailyChg.msty >= 0 ? "+" : "") + dailyChg.msty + "%" : "N/A"})`);
@@ -782,6 +803,92 @@ async function sendWeeklyWhatsApp(summary) {
     `MSTY: $${msty.price ?? "N/A"} · MSTR: $${mstr.price ?? "N/A"} · ₪${fx.price ?? "N/A"}/$ · ${allNews.length} חדשות`
   );
 })();
+
+// ══ Gmail דוח בוקר — V2.9.1 ══════════════════════════════════
+// שולח מייל HTML דרך Gmail SMTP עם App Password
+// עובד אוטונומית מ-GitHub Actions ללא Claude
+async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstrChange,
+  nextDiv, projectedILS, shares, sp500Price, nasdaqPrice, news }) {
+  if (!GMAIL_APP_PASSWORD || !GMAIL_TO) {
+    console.log("  ⏭ Gmail: GMAIL_APP_PASSWORD/GMAIL_TO לא מוגדרים — מדלג");
+    return;
+  }
+  try {
+    // nodemailer נטען דינמית (כבר בpackage.json כ-dependency)
+    const nodemailer = (await import("nodemailer")).default;
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: GMAIL_FROM, pass: GMAIL_APP_PASSWORD },
+    });
+
+    const dateStr = new Date().toLocaleDateString("he-IL", { timeZone: "Asia/Jerusalem", weekday:"long", day:"numeric", month:"long", year:"numeric" });
+    const mstyChgStr  = mstyChange != null ? `${mstyChange >= 0 ? "▲" : "▼"} ${Math.abs(mstyChange)}%` : "";
+    const mstrChgStr  = mstrChange != null ? `${mstrChange >= 0 ? "▲" : "▼"} ${Math.abs(mstrChange)}%` : "";
+
+    // HTML body
+    const newsHtml = (news || []).slice(0, 5).map(n =>
+      `<li style="margin-bottom:6px"><b style="color:#64b5f6">[${n.sourceHe || n.ticker}]</b> ${n.summaryHe || n.title}</li>`
+    ).join("");
+
+    const html = `
+<!DOCTYPE html><html dir="rtl" lang="he">
+<head><meta charset="UTF-8"><style>
+  body{font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:20px}
+  .card{background:#1e293b;border-radius:12px;padding:20px;margin-bottom:16px}
+  .title{font-size:22px;font-weight:bold;color:#38bdf8;margin-bottom:4px}
+  .sub{color:#94a3b8;font-size:13px}
+  .price{font-size:28px;font-weight:bold;color:#f1f5f9}
+  .up{color:#4ade80} .dn{color:#f87171}
+  table{width:100%;border-collapse:collapse}
+  td{padding:8px 12px;border-bottom:1px solid #334155}
+  .label{color:#94a3b8} .val{font-weight:bold;text-align:left}
+  ul{padding-right:20px;margin:0}
+  .footer{color:#475569;font-size:11px;text-align:center;margin-top:20px}
+</style></head>
+<body>
+  <div class="card">
+    <div class="title">📊 המצפן — דוח בוקר</div>
+    <div class="sub">${dateStr}</div>
+  </div>
+
+  <div class="card">
+    <table>
+      <tr><td class="label">MSTY</td><td class="val">$${mstyPrice ?? "N/A"} <span class="${(mstyChange??0)>=0?'up':'dn'}">${mstyChgStr}</span></td></tr>
+      <tr><td class="label">MSTR</td><td class="val">$${mstrPrice ?? "N/A"} <span class="${(mstrChange??0)>=0?'up':'dn'}">${mstrChgStr}</span></td></tr>
+      <tr><td class="label">USD/ILS</td><td class="val">₪${usdIls ?? "N/A"}</td></tr>
+      ${sp500Price ? `<tr><td class="label">אקסלנס S&P</td><td class="val">₪${sp500Price}</td></tr>` : ""}
+      ${nasdaqPrice ? `<tr><td class="label">אקסלנס NASDAQ</td><td class="val">₪${nasdaqPrice}</td></tr>` : ""}
+    </table>
+  </div>
+
+  ${nextDiv ? `<div class="card">
+    <div style="color:#fbbf24;font-weight:bold;margin-bottom:8px">💰 דיבידנד MSTY</div>
+    <table>
+      <tr><td class="label">סכום</td><td class="val">$${nextDiv.amount}/מניה</td></tr>
+      <tr><td class="label">ex-date</td><td class="val">${nextDiv.exDate || ""}</td></tr>
+      <tr><td class="label">צפי נטו (${shares} מניות)</td><td class="val">₪${projectedILS ?? "N/A"}</td></tr>
+    </table>
+  </div>` : ""}
+
+  ${newsHtml ? `<div class="card">
+    <div style="color:#a78bfa;font-weight:bold;margin-bottom:8px">📰 חדשות שוק</div>
+    <ul>${newsHtml}</ul>
+  </div>` : ""}
+
+  <div class="footer">המצפן V2.9.1 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
+</body></html>`;
+
+    await transporter.sendMail({
+      from:    `"📊 המצפן" <${GMAIL_FROM}>`,
+      to:      GMAIL_TO,
+      subject: `📊 המצפן ${dateStr} | MSTY $${mstyPrice ?? "?"} · MSTR $${mstrPrice ?? "?"} · ₪${usdIls ?? "?"}/$`,
+      html,
+    });
+    console.log(`  ✅ Gmail: דוח בוקר נשלח אל ${GMAIL_TO}`);
+  } catch (e) {
+    console.warn("  ⚠ Gmail שליחה נכשלה:", e.message);
+  }
+}
 
 // ══ Windows Toast Notification ═══════════════════════════════
 function sendWindowsToast(title, message) {
