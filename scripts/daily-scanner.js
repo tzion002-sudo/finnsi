@@ -29,10 +29,6 @@ const IS_THURSDAY = new Date().getDay() === 4;
 const IS_MONDAY   = new Date().getDay() === 1; // V2.9.0: שני = שליחת דוח שבועי WhatsApp
 const TAX_RATE    = 0.25; // מס רווחי הון ישראלי
 
-// V2.9.0 — IBKR Flex Query (אופציונלי — רק אם הסודות מוגדרים ב-GitHub Secrets)
-const IBKR_TOKEN    = process.env.IBKR_TOKEN    || null;
-const IBKR_QUERY_ID = process.env.IBKR_QUERY_ID || null;
-
 // V2.9.0 — WhatsApp Business Cloud API (אופציונלי)
 const WHATSAPP_TOKEN    = process.env.WHATSAPP_TOKEN    || null;
 const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || null;
@@ -433,60 +429,6 @@ function buildSummary(msty, mstr, fx, sp500) {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  V2.9.0 — IBKR Flex Query: auto-sync positions
-//  מקרא: https://www.interactivebrokers.com/en/trading/flex-queries.php
-//  הגדרה ידנית: IBKR Account Management → Reports → Flex Queries
-//  → צור query עם Positions (Symbol, Position, MarkPrice, PositionValue)
-//  → הוסף IBKR_TOKEN + IBKR_QUERY_ID ל-GitHub Secrets
-// ══════════════════════════════════════════════════════════════
-async function fetchIBKRPositions() {
-  if (!IBKR_TOKEN || !IBKR_QUERY_ID) {
-    console.log("  ⏭ IBKR: IBKR_TOKEN/IBKR_QUERY_ID לא מוגדרים — מדלג");
-    return null;
-  }
-  try {
-    console.log("  📡 IBKR: שולח Flex Query Request...");
-    // שלב א: בקש דוח — מקבל reference code
-    const reqUrl = `https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest?t=${IBKR_TOKEN}&q=${IBKR_QUERY_ID}&v=3`;
-    const { body: reqBody } = await httpsRequest(reqUrl);
-    const refCode = typeof reqBody === "string"
-      ? reqBody.match(/<ReferenceCode>([^<]+)<\/ReferenceCode>/)?.[1]
-      : null;
-    if (!refCode) { console.warn("  ⚠ IBKR: לא התקבל ReferenceCode"); return null; }
-
-    // המתן 5 שניות לעיבוד
-    await new Promise(r => setTimeout(r, 5000));
-
-    // שלב ב: קבל דוח
-    const getUrl = `https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement?q=${refCode}&t=${IBKR_TOKEN}&v=3`;
-    const { body: xml } = await httpsRequest(getUrl);
-    if (typeof xml !== "string") { console.warn("  ⚠ IBKR: תגובה לא תקינה"); return null; }
-
-    // פרסר XML בסיסי — חלץ Position elements
-    const positions = {};
-    const posMatches = xml.matchAll(/<Position\s([^/]+)\/>/g);
-    for (const match of posMatches) {
-      const attrs = match[1];
-      const symbol = attrs.match(/symbol="([^"]+)"/)?.[1];
-      const qty    = parseFloat(attrs.match(/position="([^"]+)"/)?.[1] || "0");
-      const price  = parseFloat(attrs.match(/markPrice="([^"]+)"/)?.[1] || "0");
-      const val    = parseFloat(attrs.match(/positionValue="([^"]+)"/)?.[1] || "0");
-      if (symbol && qty !== 0) {
-        positions[symbol] = { qty, markPrice: price, positionValue: val };
-      }
-    }
-
-    if (Object.keys(positions).length === 0) { console.warn("  ⚠ IBKR: לא נמצאו פוזיציות ב-XML"); return null; }
-
-    console.log(`  ✅ IBKR: ${Object.keys(positions).length} פוזיציות — MSTY:${positions.MSTY?.qty ?? 0} MSTR:${positions.MSTR?.qty ?? 0}`);
-    return positions;
-  } catch (e) {
-    console.warn("  ⚠ IBKR Flex Query נכשל:", e.message);
-    return null;
-  }
-}
-
-// ══════════════════════════════════════════════════════════════
 //  V2.9.0 — WhatsApp Weekly Summary (שני בבוקר)
 //  Meta WhatsApp Business Cloud API — חינמי עד 1,000 הודעות/חודש
 //  הגדרה: developers.facebook.com/apps → WhatsApp → Getting Started
@@ -803,25 +745,10 @@ async function sendWeeklyWhatsApp(summary) {
     }, "scanner_status/latest"),
   ]);
 
-  // ══ שלב 9: V2.9.0 — IBKR Flex Query (אם מוגדר) ══════════
-  console.log("\n🏦 V2.9.0 — IBKR Flex Query...");
-  const ibkrPositions = await fetchIBKRPositions();
-  if (ibkrPositions) {
-    // שמור פוזיציות ל-Firestore עבור טאב FIRE באפליקציה
-    await fsWrite("ibkr_positions", "latest", {
-      updatedAt: NOW_ISO,
-      date:      TODAY,
-      positions: ibkrPositions,
-      MSTY: ibkrPositions.MSTY || null,
-      MSTR: ibkrPositions.MSTR || null,
-    }, "ibkr_positions/latest");
-  }
-
-  // ══ שלב 10: V2.9.0 — WhatsApp שבועי (יום שני בלבד) ═══════
+  // ══ שלב 9: V2.9.0 — WhatsApp שבועי (יום שני בלבד) ══════════
   if (IS_MONDAY) {
     console.log("\n📱 V2.9.0 — שולח דוח WhatsApp שבועי (יום שני)...");
-    // כמות מניות: מ-IBKR אם זמין, אחרת מ-Firestore (נטען בשלב 5)
-    const sharesForWA = ibkrPositions?.MSTY?.qty ?? projectedDividend?.shares ?? 118;
+    const sharesForWA = projectedDividend?.shares ?? 118;
     const avgDivForWA = nextDividend?.amount ?? 0.55;
     const monthlyIncomeEst = sharesForWA > 0
       ? sharesForWA * avgDivForWA * 4.33 * (fx.price || 3.6)
