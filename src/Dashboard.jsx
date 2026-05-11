@@ -3193,11 +3193,9 @@ const TradeJournalRow = ({ row, onChange, onDelete }) => {
   );
 };
 
-// ══════════════════════════════════════════════════════════════
-//  FireTab — V2.9.0 · מחשבון FIRE (Financial Independence, Retire Early)
-//  חישוב יעד הכנסה פסיבית ממניות MSTY · סימולטור קנייה · תרחישי סיכון
-// ══════════════════════════════════════════════════════════════
-const FireTab = ({ mstyAsset, mstyDividends, mstyPrice, fx, fireTarget, setFireTarget, onFireTargetSave }) => {
+// FireTab removed — V2.9.2
+const FireTab = () => null; // stub to avoid reference errors during cleanup
+const _FireTab_unused = ({ mstyAsset, mstyDividends, mstyPrice, fx, fireTarget, setFireTarget, onFireTargetSave }) => {
   const sharesCount  = mstyAsset?.sharesCount || 0;
   const fxRate       = fx || 3.6;
   const currentPrice = mstyPrice || MSTY_DEFAULTS.currentPrice;
@@ -4449,7 +4447,6 @@ export default function HaMatzpanGemelnet() {
           { key:"loans",       label:"הלוואות",     icon:<CreditCard size={14}/>,      color:"border-rose-500",    badge: loans.length },
           { key:"savings",     label:"חסכונות",     icon:<PiggyBank size={14}/>,       color:"border-teal-500",    badge: savings.length },
           { key:"documents",   label:"מחסן דוחות",  icon:<FileText size={14}/>,        color:"border-sky-500",     badge: documents.length || null },
-          { key:"fire",        label:"🎯 FIRE",      icon:null,                         color:"border-amber-400"  },
         ].map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
             className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium rounded-t-lg transition-colors whitespace-nowrap ${
@@ -4666,22 +4663,6 @@ export default function HaMatzpanGemelnet() {
         />
       )}
 
-      {/* V2.9.0 — FIRE Calculator */}
-      {tab === "fire" && (
-        <FireTab
-          mstyAsset={assets.find(a => a.isMSTY)}
-          mstyDividends={mstyDividends}
-          mstyPrice={mstyPrice}
-          fx={mstyFX}
-          fireTarget={fireTarget}
-          setFireTarget={setFireTarget}
-          onFireTargetSave={(val) => {
-            setFireTarget(val);
-            saveSettings({ loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget: val })
-              .catch(e => console.warn("fireTarget save failed:", e));
-          }}
-        />
-      )}
 
       {/* V2.7.0 — Missed Scan Banner הוסר (מבלבל; מחירים נטענים אוטומטית מ-Firestore) */}
 

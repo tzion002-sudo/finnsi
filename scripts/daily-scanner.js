@@ -768,21 +768,36 @@ async function sendWeeklyWhatsApp(summary) {
     });
   }
 
-  // ══ שלב 9: V2.9.1 — Gmail דוח בוקר יומי ══════════════════
-  console.log("\n📧 V2.9.1 — שולח דוח בוקר במייל...");
-  await sendMorningEmail({
-    mstyPrice:    msty.price,
-    mstrPrice:    mstr.price,
-    usdIls:       fx.price,
-    mstyChange:   dailyChg.msty,
-    mstrChange:   dailyChg.mstr,
-    nextDiv:      nextDividend ? { amount: nextDividend.amount, exDate: nextDividend.date } : null,
-    projectedILS: projectedDividend?.netILS ?? null,
-    shares:       projectedDividend?.shares ?? 118,
-    sp500Price:   sp500.price,
-    nasdaqPrice:  nasdaq.price,
-    news:         allNews,
+  // ══ שלב 9: V2.9.2 — Gmail דוח בוקר יומי (ידיעות חדשות בלבד) ══
+  console.log("\n📧 V2.9.2 — שולח דוח בוקר במייל...");
+  // טעינת ה-URLs שנשלחו בפעם הקודמת
+  let prevEmailedUrls = [];
+  try {
+    const scanStatus = await fsRead("scanner_status", "latest");
+    prevEmailedUrls = Array.isArray(scanStatus?.lastEmailedNewsUrls) ? scanStatus.lastEmailedNewsUrls : [];
+  } catch { /* אין היסטוריה */ }
+
+  const sentUrls = await sendMorningEmail({
+    mstyPrice:       msty.price,
+    mstrPrice:       mstr.price,
+    usdIls:          fx.price,
+    mstyChange:      dailyChg.msty,
+    mstrChange:      dailyChg.mstr,
+    nextDiv:         nextDividend ? { amount: nextDividend.amount, exDate: nextDividend.date } : null,
+    projectedILS:    projectedDividend?.netILS ?? null,
+    shares:          projectedDividend?.shares ?? 118,
+    sp500Price:      sp500.price,
+    nasdaqPrice:     nasdaq.price,
+    news:            allNews,
+    prevEmailedUrls,
   });
+
+  // שמור URLs שנשלחו (למניעת שליחה כפולה מחר)
+  if (Array.isArray(sentUrls) && sentUrls.length > 0) {
+    try {
+      await fsWrite({ lastEmailedNewsUrls: sentUrls }, "scanner_status/email_history");
+    } catch (e) { console.warn("  ⚠ שמירת היסטוריית מיילים נכשלה:", e.message); }
+  }
 
   // ══ סיכום ══════════════════════════════════════════════════
   console.log("\n── סיכום V2.9.0 Precision Focus ─────────────────────────");
@@ -808,10 +823,10 @@ async function sendWeeklyWhatsApp(summary) {
 // שולח מייל HTML דרך Gmail SMTP עם App Password
 // עובד אוטונומית מ-GitHub Actions ללא Claude
 async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstrChange,
-  nextDiv, projectedILS, shares, sp500Price, nasdaqPrice, news }) {
+  nextDiv, projectedILS, shares, sp500Price, nasdaqPrice, news, prevEmailedUrls = [] }) {
   if (!GMAIL_APP_PASSWORD || !GMAIL_TO) {
     console.log("  ⏭ Gmail: GMAIL_APP_PASSWORD/GMAIL_TO לא מוגדרים — מדלג");
-    return;
+    return null;
   }
   try {
     // nodemailer נטען דינמית (כבר בpackage.json כ-dependency)
@@ -825,9 +840,20 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
     const mstyChgStr  = mstyChange != null ? `${mstyChange >= 0 ? "▲" : "▼"} ${Math.abs(mstyChange)}%` : "";
     const mstrChgStr  = mstrChange != null ? `${mstrChange >= 0 ? "▲" : "▼"} ${Math.abs(mstrChange)}%` : "";
 
-    // HTML body
-    const newsHtml = (news || []).slice(0, 5).map(n =>
-      `<li style="margin-bottom:6px"><b style="color:#64b5f6">[${n.sourceHe || n.ticker}]</b> ${n.summaryHe || n.title}</li>`
+    // V2.9.2 — סנן ידיעות שכבר נשלחו (לפי URL) + הגבל ל-5 חדשות
+    const prevUrls = new Set(prevEmailedUrls || []);
+    const newNews  = (news || []).filter(n => n.url && !prevUrls.has(n.url)).slice(0, 5);
+    const sentUrls = newNews.map(n => n.url).filter(Boolean);
+
+    // HTML body — V2.9.2: כל כותרת = קישור לכתבה המקורית
+    const newsHtml = newNews.map(n =>
+      `<li style="margin-bottom:8px">
+        <b style="color:#64b5f6">[${n.sourceHe || n.ticker}]</b>
+        ${n.url
+          ? `<a href="${n.url}" style="color:#e2e8f0;text-decoration:none" target="_blank">${n.summaryHe || n.title}</a>`
+          : (n.summaryHe || n.title)}
+        <span style="color:#475569;font-size:11px;display:block;margin-top:2px">לחץ לכתבה המלאה ↗</span>
+      </li>`
     ).join("");
 
     const html = `
@@ -878,15 +904,22 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
   <div class="footer">המצפן V2.9.1 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
 </body></html>`;
 
+    // שלח רק אם יש ידיעות חדשות או אם זו ריצה ראשונה (אין היסטוריה)
+    if (newNews.length === 0 && prevEmailedUrls.length > 0) {
+      console.log("  ℹ Gmail: אין ידיעות חדשות מאז המייל האחרון — לא נשלח");
+      return sentUrls;
+    }
     await transporter.sendMail({
       from:    `"📊 המצפן" <${GMAIL_FROM}>`,
       to:      GMAIL_TO,
       subject: `📊 המצפן ${dateStr} | MSTY $${mstyPrice ?? "?"} · MSTR $${mstrPrice ?? "?"} · ₪${usdIls ?? "?"}/$`,
       html,
     });
-    console.log(`  ✅ Gmail: דוח בוקר נשלח אל ${GMAIL_TO}`);
+    console.log(`  ✅ Gmail: דוח בוקר נשלח אל ${GMAIL_TO} (${newNews.length} ידיעות חדשות)`);
+    return sentUrls;
   } catch (e) {
     console.warn("  ⚠ Gmail שליחה נכשלה:", e.message);
+    return null;
   }
 }
 
