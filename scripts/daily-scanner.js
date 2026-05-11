@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Daily Scanner  –  V2.9.3
+//  HaMatzpan · Daily Scanner  –  V2.9.4
 //  Precision Focus: MSTR · MSTY · IBIT · Excellence 1183441/1159243 · FX
 //
 //  V2.8.0:
@@ -839,55 +839,200 @@ async function yahooHistory(ticker) {
   if (!result) throw new Error("No data");
   const q = result.indicators.quote[0];
   const combined = (result.timestamp || [])
-    .map((t, i) => ({ c: q.close[i], h: q.high[i], l: q.low[i] }))
+    .map((t, i) => ({ t, c: q.close[i], h: q.high[i], l: q.low[i] }))
     .filter(r => r.c != null && r.h != null && r.l != null);
   if (combined.length < 21) throw new Error(`רק ${combined.length} נרות`);
   return {
-    closes: combined.map(r => r.c),
-    highs:  combined.map(r => r.h),
-    lows:   combined.map(r => r.l),
+    closes:     combined.map(r => r.c),
+    highs:      combined.map(r => r.h),
+    lows:       combined.map(r => r.l),
+    timestamps: combined.map(r => r.t),
   };
 }
 
-// ══ V2.9.3 — סורק תעלות: Channel Scan ════════════════════════
-// בודק כל מנייה ברשימה: Bollinger Bands (20,2SD) + CCI (20)
-// התראה: CCI < -100 ומחיר בתוך 5% מה-BB התחתון
+// ══ V2.9.4 — Linear Regression Channel ════════════════════════
+// מחשב קווי תעלה ישרים (כמו ציור ידני על גרף)
+// slope + intercept + 2 סטיות תקן מעל ומתחת = קו עליון/תחתון
+function calcLinearRegressionChannel(closes, stdDevMult = 2) {
+  const n = closes.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (let i = 0; i < n; i++) {
+    sumX  += i;
+    sumY  += closes[i];
+    sumXY += i * closes[i];
+    sumX2 += i * i;
+  }
+  const slope     = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+  const intercept = (sumY - slope * sumX) / n;
+  let sumSqResid  = 0;
+  for (let i = 0; i < n; i++) {
+    const r = closes[i] - (slope * i + intercept);
+    sumSqResid += r * r;
+  }
+  const stdDev    = Math.sqrt(sumSqResid / n);
+  const midLine   = Array.from({ length: n }, (_, i) => slope * i + intercept);
+  const upperLine = midLine.map(v => v + stdDevMult * stdDev);
+  const lowerLine = midLine.map(v => v - stdDevMult * stdDev);
+  return {
+    slope, intercept, stdDev,
+    midLine, upperLine, lowerLine,
+    lrcLower: lowerLine[n - 1],
+    lrcUpper: upperLine[n - 1],
+    lrcMid:   midLine[n - 1],
+  };
+}
+
+// ══ V2.9.4 — Chart Generation via QuickChart.io ═══════════════
+// מייצר תמונת גרף PNG עם מחיר + BB + תעלת רגרסיה + CCI
+// מחזיר URL לתמונה (מוטמע במייל ונשמר ב-Firestore)
+async function generateChartUrl(ticker, closes, timestamps, bbArr, lrc, lastCCI) {
+  try {
+    const n      = closes.length;
+    const bbStart = n - bbArr.length; // BB מחשב מנקודה 20
+
+    // תוויות תאריך על ציר X (כל 10 ימים)
+    const labels = timestamps.map(t =>
+      new Date(t * 1000).toLocaleDateString("he-IL", { month: "short", day: "numeric" })
+    );
+
+    const chartConfig = {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          // מחיר סגירה (קו לבן)
+          {
+            label: ticker,
+            data: closes.map(c => +c.toFixed(2)),
+            borderColor: "#f1f5f9",
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: false,
+            tension: 0.1,
+          },
+          // BB עליון (ירוק מקווקו)
+          {
+            label: "BB Upper",
+            data: [...Array(bbStart).fill(null), ...bbArr.map(b => +b.upper.toFixed(2))],
+            borderColor: "#4ade80",
+            borderWidth: 1,
+            borderDash: [4, 3],
+            pointRadius: 0,
+            fill: false,
+          },
+          // BB תחתון (אדום מקווקו)
+          {
+            label: "BB Lower",
+            data: [...Array(bbStart).fill(null), ...bbArr.map(b => +b.lower.toFixed(2))],
+            borderColor: "#f87171",
+            borderWidth: 1,
+            borderDash: [4, 3],
+            pointRadius: 0,
+            fill: false,
+          },
+          // LRC עליון (כחול)
+          {
+            label: "Channel ↑",
+            data: lrc.upperLine.map(v => +v.toFixed(2)),
+            borderColor: "#60a5fa",
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+          },
+          // LRC תחתון (כתום) — קו הסט-אפ
+          {
+            label: "Channel ↓",
+            data: lrc.lowerLine.map(v => +v.toFixed(2)),
+            borderColor: "#fb923c",
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: false,
+          },
+        ],
+      },
+      options: {
+        plugins: {
+          legend: { labels: { color: "#94a3b8", font: { size: 10 }, boxWidth: 12 } },
+          title:  { display: true, text: `🚨 ${ticker} — תחתית תעלה | CCI: ${lastCCI}`, color: "#fcd34d", font: { size: 13 } },
+        },
+        scales: {
+          x: { ticks: { color: "#64748b", maxTicksLimit: 8, font: { size: 9 } }, grid: { color: "#1e293b" } },
+          y: { ticks: { color: "#64748b", font: { size: 9 } },                   grid: { color: "#1e293b" } },
+        },
+      },
+    };
+
+    const res = await httpsRequest(
+      "https://quickchart.io/chart/create",
+      { method: "POST", headers: { "Content-Type": "application/json" }, timeout: 15000 },
+      { chart: chartConfig, width: 620, height: 320, backgroundColor: "#0f172a", format: "png" }
+    );
+    return res.body?.url || null;
+  } catch (e) {
+    console.warn(`  ⚠ chart URL generation failed for ${ticker}: ${e.message}`);
+    return null;
+  }
+}
+
+// ══ V2.9.4 — סורק תעלות: Channel Scan ════════════════════════
+// בודק כל מנייה: Bollinger Bands (20,2SD) + Linear Regression Channel + CCI (20)
+// התראה: CCI < -100 ומחיר בתוך 5% מהקו התחתון (BB OR LRC — מספיק אחד)
 async function runChannelScan() {
-  console.log(`\n📡 [V2.9.3] סורק תעלות — ${WATCHLIST.length} מניות`);
+  console.log(`\n📡 [V2.9.4] סורק תעלות (BB + LRC) — ${WATCHLIST.length} מניות`);
   const alerts = [];
 
   for (const ticker of WATCHLIST) {
     try {
-      const { closes, highs, lows } = await yahooHistory(ticker);
+      const { closes, highs, lows, timestamps } = await yahooHistory(ticker);
 
-      // Bollinger Bands (period=20, stdDev=2)
-      const bbArr  = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
-      const lastBB = bbArr[bbArr.length - 1]; // { upper, middle, lower }
+      // ── Bollinger Bands (period=20, stdDev=2) ──
+      const bbArr   = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
+      const lastBB  = bbArr[bbArr.length - 1];
 
-      // CCI (Commodity Channel Index, period=20)
-      const cciArr = CCI.calculate({ period: 20, high: highs, low: lows, close: closes });
+      // ── CCI (period=20) ──
+      const cciArr  = CCI.calculate({ period: 20, high: highs, low: lows, close: closes });
       const lastCCI = cciArr[cciArr.length - 1];
 
-      const lastClose     = closes[closes.length - 1];
-      const pctAboveLower = ((lastClose - lastBB.lower) / lastBB.lower) * 100;
+      // ── Linear Regression Channel (60 ימים, 2SD) ──
+      const lrc      = calcLinearRegressionChannel(closes, 2);
 
-      // תנאי התראה: CCI < -100 ומחיר בתוך 5% מהקו התחתון
-      if (lastCCI < -100 && pctAboveLower <= 5) {
-        const alert = {
+      const lastClose    = closes[closes.length - 1];
+      const pctFromBB    = ((lastClose - lastBB.lower)  / lastBB.lower)  * 100;
+      const pctFromLRC   = ((lastClose - lrc.lrcLower)  / Math.abs(lrc.lrcLower)) * 100;
+
+      // תנאי CCI (חייב — מחיר בתחתית + oversold)
+      const cciOversold  = lastCCI < -100;
+      // מנגנון ראשי: BB תחתון
+      const bbAlert      = cciOversold && pctFromBB  <= 5;
+      // מנגנון משני: LRC תחתון (קו ישר — יתפוס תבניות כמו IREN)
+      const lrcAlert     = cciOversold && pctFromLRC <= 5;
+
+      if (bbAlert || lrcAlert) {
+        const triggerMethod = bbAlert && lrcAlert ? "BB+LRC" : bbAlert ? "BB" : "LRC";
+        const pctFromLower  = bbAlert ? +pctFromBB.toFixed(1) : +pctFromLRC.toFixed(1);
+
+        console.log(`  🚨 ${ticker} [${triggerMethod}]: $${lastClose.toFixed(2)} | BB↓=$${lastBB.lower.toFixed(2)} | LRC↓=$${lrc.lrcLower.toFixed(2)} | CCI=${Math.round(lastCCI)}`);
+
+        // ── יצירת גרף ──
+        const chartUrl = await generateChartUrl(ticker, closes, timestamps, bbArr, lrc, Math.round(lastCCI));
+
+        alerts.push({
           ticker,
-          close:        +lastClose.toFixed(2),
-          lowerBB:      +lastBB.lower.toFixed(2),
-          upperBB:      +lastBB.upper.toFixed(2),
-          cci:          Math.round(lastCCI),
-          pctFromLower: +pctAboveLower.toFixed(1),
-          scannedAt:    new Date().toISOString(),
-        };
-        alerts.push(alert);
-        console.log(`  🚨 ${ticker}: close=$${alert.close}, BB↓=$${alert.lowerBB}, CCI=${alert.cci}, מרחק=${alert.pctFromLower}%`);
+          close:         +lastClose.toFixed(2),
+          lowerBB:       +lastBB.lower.toFixed(2),
+          upperBB:       +lastBB.upper.toFixed(2),
+          lrcLower:      +lrc.lrcLower.toFixed(2),
+          lrcUpper:      +lrc.lrcUpper.toFixed(2),
+          cci:           Math.round(lastCCI),
+          pctFromLower,
+          triggerMethod, // "BB" | "LRC" | "BB+LRC"
+          chartUrl,      // URL לגרף PNG מ-QuickChart.io (null אם נכשל)
+          scannedAt:     new Date().toISOString(),
+        });
       }
 
-      // rate-limit קל — 250ms בין מניות
-      await new Promise(r => setTimeout(r, 250));
+      // rate-limit — 300ms בין מניות (כולל קריאת QuickChart)
+      await new Promise(r => setTimeout(r, 300));
     } catch (e) {
       console.warn(`  ⚠️ ${ticker}: ${e.message}`);
     }
@@ -989,23 +1134,44 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
   </div>` : ""}
 
   <div class="card">
-    <div style="color:#f87171;font-weight:bold;margin-bottom:8px">🚨 סורק תעלות — מניות בתחתית</div>
+    <div style="color:#f87171;font-weight:bold;margin-bottom:12px;font-size:16px">🚨 סורק תעלות — מניות בתחתית</div>
     ${channelAlerts.length === 0
       ? `<p style="color:#64748b;margin:0">אין התראות כיום — כל המניות ברשימה רחוקות מתחתית הערוץ 🟢</p>`
-      : channelAlerts.map(a =>
-          `<p style="margin:4px 0;padding:6px 10px;background:#1a1a2e;border-radius:6px;border-right:3px solid #ef4444">
-            🚨 <b style="color:#fcd34d">${a.ticker}</b>
-            — $${a.close}
-            | BB↓ <span style="color:#f87171">$${a.lowerBB}</span>
-            | CCI <b style="color:#ef4444">${a.cci}</b>
-            | מרחק ${a.pctFromLower}% מתחתית
-          </p>`
-        ).join("")
+      : channelAlerts.map(a => `
+          <div style="margin-bottom:20px;padding:12px;background:#0f172a;border-radius:8px;border-right:4px solid #ef4444">
+            <div style="margin-bottom:8px">
+              🚨 <b style="color:#fcd34d;font-size:15px">${a.ticker}</b>
+              <span style="background:#1e293b;color:#94a3b8;font-size:11px;padding:2px 7px;border-radius:4px;margin-right:8px">${a.triggerMethod || "BB"}</span>
+            </div>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+              <tr>
+                <td style="color:#94a3b8;padding:3px 8px">מחיר סגירה</td>
+                <td style="color:#f1f5f9;font-weight:bold;padding:3px 8px">$${a.close}</td>
+                <td style="color:#94a3b8;padding:3px 8px">CCI</td>
+                <td style="color:#ef4444;font-weight:bold;padding:3px 8px">${a.cci}</td>
+              </tr>
+              <tr>
+                <td style="color:#94a3b8;padding:3px 8px">BB תחתון</td>
+                <td style="color:#f87171;padding:3px 8px">$${a.lowerBB}</td>
+                <td style="color:#94a3b8;padding:3px 8px">LRC תחתון</td>
+                <td style="color:#fb923c;padding:3px 8px">$${a.lrcLower ?? "N/A"}</td>
+              </tr>
+              <tr>
+                <td style="color:#94a3b8;padding:3px 8px">מרחק מתחתית</td>
+                <td style="color:#fbbf24;font-weight:bold;padding:3px 8px">${a.pctFromLower}%</td>
+              </tr>
+            </table>
+            ${a.chartUrl
+              ? `<img src="${a.chartUrl}" alt="${a.ticker} chart" style="width:100%;max-width:620px;border-radius:6px;display:block">`
+              : `<p style="color:#475569;font-size:11px">גרף לא זמין</p>`
+            }
+          </div>
+        `).join("")
     }
-    <p style="color:#475569;font-size:11px;margin-top:8px">תנאי: CCI &lt; -100 &amp; מחיר בתוך 5% מ-Bollinger Band תחתון (20, 2SD)</p>
+    <p style="color:#475569;font-size:11px;margin-top:4px">תנאי: CCI &lt; -100 &amp; מחיר בתוך 5% מ-BB תחתון (20, 2SD) או LRC תחתון (60 ימים)</p>
   </div>
 
-  <div class="footer">המצפן V2.9.3 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
+  <div class="footer">המצפן V2.9.4 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
 </body></html>`;
 
     // שלח רק אם יש ידיעות חדשות או אם זו ריצה ראשונה (אין היסטוריה)

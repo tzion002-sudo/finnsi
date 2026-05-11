@@ -17,8 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.9.3
-//  V2.9.3 — Channel Scanner: Bollinger Bands + CCI < -100 · Alerts tab · Morning email alerts section
+//  "המצפן" – HaMatzpan V2.9.4
+//  V2.9.4 — Channel Scanner: BB + Linear Regression Channel + CCI · Chart image per alert (QuickChart)
 //  V2.9.2 — Remove FIRE tab · Gmail news dedup + clickable links · Fix duplicate dividends backfill
 //  V2.8.0 — Morning Brief smart ack · No duplicate divs · Agora÷100 fix · IBIT USD P&L · GitHub Actions · News Hebrew labels
 //  V2.7.2 — ROOT CAUSE FIX: Firestore DB named "default" (not "(default)")
@@ -33,7 +33,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.3";
+const APP_VERSION = "V2.9.4";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -4675,53 +4675,74 @@ export default function HaMatzpanGemelnet() {
         />
       )}
 
-      {/* V2.9.3 — טאב התראות תעלות */}
+      {/* V2.9.4 — טאב התראות תעלות עם גרפים */}
       {tab === "alerts" && (
         <div className="p-4" dir="rtl">
-          <h2 className="text-xl font-bold mb-2 text-white">🚨 סורק תעלות — מניות בתחתית הערוץ</h2>
-          <p className="text-xs text-slate-400 mb-4">
-            תנאי התראה: CCI &lt; ‑100 <b>וגם</b> מחיר בתוך 5% מ-Bollinger Band תחתון (20 ימים, 2SD) · מתעדכן בסריקה הבוקרית
+          <h2 className="text-xl font-bold mb-1 text-white">🚨 סורק תעלות — מניות בתחתית הערוץ</h2>
+          <p className="text-xs text-slate-400 mb-5">
+            תנאי: CCI &lt; ‑100 <b>וגם</b> מחיר בתוך 5% מ-BB תחתון (20, 2SD) <b>או</b> LRC תחתון (60 ימים) · מתעדכן בסריקה הבוקרית
           </p>
           {channelAlerts.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center gap-3">
               <span className="text-4xl">🟢</span>
-              <p className="text-emerald-400 font-medium">אין התראות כיום</p>
+              <p className="text-emerald-400 font-medium text-lg">אין התראות כיום</p>
               <p className="text-slate-500 text-sm">כל המניות ברשימה רחוקות מתחתית הערוץ</p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm border-collapse">
-                <thead>
-                  <tr className="text-slate-400 border-b border-slate-700">
-                    <th className="text-right py-2 px-3 font-medium">טיקר</th>
-                    <th className="text-right py-2 px-3 font-medium">מחיר סגירה</th>
-                    <th className="text-right py-2 px-3 font-medium">BB תחתון</th>
-                    <th className="text-right py-2 px-3 font-medium">BB עליון</th>
-                    <th className="text-right py-2 px-3 font-medium">CCI</th>
-                    <th className="text-right py-2 px-3 font-medium">מרחק מתחתית</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {channelAlerts.map(a => (
-                    <tr key={a.ticker} className="border-b border-slate-800 hover:bg-slate-800/50 transition-colors">
-                      <td className="py-3 px-3 font-bold text-amber-400">{a.ticker}</td>
-                      <td className="py-3 px-3 text-slate-200">${a.close}</td>
-                      <td className="py-3 px-3 text-red-400 font-medium">${a.lowerBB}</td>
-                      <td className="py-3 px-3 text-emerald-400">${a.upperBB}</td>
-                      <td className="py-3 px-3 text-red-500 font-bold">{a.cci}</td>
-                      <td className="py-3 px-3">
-                        <span className="bg-orange-900/40 text-orange-400 px-2 py-0.5 rounded text-xs font-mono">
-                          {a.pctFromLower}%
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="flex flex-col gap-6">
+              {channelAlerts.map(a => (
+                <div key={a.ticker} className="bg-slate-800/60 border border-slate-700 rounded-xl overflow-hidden">
+                  {/* כותרת */}
+                  <div className="flex items-center justify-between p-4 border-b border-slate-700">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl font-bold text-amber-400">{a.ticker}</span>
+                      <span className="text-xs bg-red-900/50 text-red-400 border border-red-800 px-2 py-0.5 rounded-full">
+                        {a.triggerMethod || "BB"}
+                      </span>
+                    </div>
+                    <span className="text-lg font-bold text-white">${a.close}</span>
+                  </div>
+
+                  {/* נתונים */}
+                  <div className="grid grid-cols-2 gap-3 p-4 text-sm">
+                    <div className="bg-slate-900/50 rounded-lg p-3">
+                      <div className="text-slate-400 text-xs mb-1">BB תחתון</div>
+                      <div className="text-red-400 font-bold">${a.lowerBB}</div>
+                    </div>
+                    <div className="bg-slate-900/50 rounded-lg p-3">
+                      <div className="text-slate-400 text-xs mb-1">LRC תחתון</div>
+                      <div className="text-orange-400 font-bold">${a.lrcLower ?? "N/A"}</div>
+                    </div>
+                    <div className="bg-slate-900/50 rounded-lg p-3">
+                      <div className="text-slate-400 text-xs mb-1">CCI</div>
+                      <div className="text-red-500 font-bold text-lg">{a.cci}</div>
+                    </div>
+                    <div className="bg-slate-900/50 rounded-lg p-3">
+                      <div className="text-slate-400 text-xs mb-1">מרחק מתחתית</div>
+                      <div className="text-yellow-400 font-bold">{a.pctFromLower}%</div>
+                    </div>
+                  </div>
+
+                  {/* גרף */}
+                  {a.chartUrl ? (
+                    <div className="px-4 pb-4">
+                      <img
+                        src={a.chartUrl}
+                        alt={`${a.ticker} channel chart`}
+                        className="w-full rounded-lg border border-slate-700"
+                        style={{ maxHeight: 320, objectFit: "contain" }}
+                      />
+                    </div>
+                  ) : (
+                    <div className="px-4 pb-4 text-center text-slate-600 text-xs">גרף לא זמין</div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
-          <p className="text-xs text-slate-600 mt-4">
-            מניות בסריקה: {/* רשימה מוגדרת ב-scripts/watchlist.js */} ראה scripts/watchlist.js
+          <p className="text-xs text-slate-600 mt-6">
+            {channelAlerts.length > 0 && `${channelAlerts.length} התראות · `}
+            רשימת מניות: scripts/watchlist.js
           </p>
         </div>
       )}
