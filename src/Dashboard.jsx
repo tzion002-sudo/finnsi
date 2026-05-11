@@ -17,8 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.9.0
-//  V2.9.0 — FIRE Calculator tab · Monthly dividend income in morning brief · IB Flex Query · WhatsApp weekly summary
+//  "המצפן" – HaMatzpan V2.9.2
+//  V2.9.2 — Remove FIRE tab · Gmail news dedup + clickable links · Fix duplicate dividends backfill
 //  V2.8.0 — Morning Brief smart ack · No duplicate divs · Agora÷100 fix · IBIT USD P&L · GitHub Actions · News Hebrew labels
 //  V2.7.2 — ROOT CAUSE FIX: Firestore DB named "default" (not "(default)")
 //  V2.7.1 — Critical Save Fix · Dividends All-April · Excellence Auto-Calc
@@ -32,7 +32,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.0";
+const APP_VERSION = "V2.9.2";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
