@@ -4034,29 +4034,8 @@ export default function HaMatzpanGemelnet() {
     const handleData = (data) => {
       if (!data?.date) return;
 
-      // ── V2.6.1 · Backfill: מיזוג כל דיבידנדי אפריל לתוך mstyDividends ──
-      const recent = data?.msty?.recentDividends;
-      if (Array.isArray(recent) && recent.length > 0) {
-        suppressSaveToastRef.current = true;
-        setMstyDividends(prev => {
-          const existing = new Set((prev || []).map(d => d.date));
-          const splitDate = "2025-12-08";
-          const additions = recent
-            .filter(r => !existing.has(r.exDate))
-            .map(r => ({
-              date:        r.exDate,
-              amount:      r.amount,
-              verified:    r.status === "confirmed",
-              status:      r.status || "confirmed",
-              shareBasis:  new Date(r.exDate) < new Date(splitDate) ? "pre" : "post",
-              source:      "scanner_backfill",
-              note:        "נוסף אוטומטית מסקנר Firestore (היסטוריית 3 חודשים)",
-            }));
-          if (additions.length === 0) return prev;
-          console.log(`✅ Backfill: נוספו ${additions.length} דיבידנדים מהסקנר`);
-          return [...prev, ...additions];
-        });
-      }
+      // V2.9.1 — הוסר backfill אוטומטי (גרם לכפילויות לאחר מחיקה ידנית)
+      // דיבידנדים מתווספים רק דרך applyScanFindings (לחיצת "עדכן מחירים") עם dedup מובנה
 
       // הצגת המודל — V2.8.4: ack כולל תאריך הצפייה (viewDate) + תוכן הסריקה
       // viewDate = היום — מבטיח שהמודל יוצג פעם אחת בכל יום גם אם הסריקה מיום קודם
