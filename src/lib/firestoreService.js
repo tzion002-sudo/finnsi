@@ -34,6 +34,7 @@ const settingsRef   = ()            => doc(db, 'families', FAMILY_ID, 'settings'
 const marketDataRef    = ()         => doc(db, 'market_data', 'latest');
 const scannerStatusRef = ()         => doc(db, 'scanner_status', 'latest');
 const marketHistoryRef = (date)     => doc(db, 'market_history', date);
+const scannerAlertsRef = ()         => doc(db, 'scanner_alerts', 'latest'); // V2.9.3
 
 // ── LocalStorage fallback helpers ────────────────────────────────────────────
 function lsLoad(key, def) {
@@ -395,6 +396,29 @@ export function subscribeToScannerStatus(onData, onError) {
     },
     err => {
       console.error('subscribeToScannerStatus:', err);
+      if (onError) onError(err);
+    }
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CHANNEL ALERTS  (V2.9.3 — channel scanner results)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Real-time listener for scanner_alerts/latest written by the Node scanner.
+ * Returns an unsubscribe function.
+ * Data shape: { alerts: [{ticker, close, lowerBB, upperBB, cci, pctFromLower, scannedAt}], date, count }
+ */
+export function subscribeToAlerts(onData, onError) {
+  if (!isFirebaseReady()) return () => {};
+  return onSnapshot(
+    scannerAlertsRef(),
+    snap => {
+      onData(snap.exists() ? snap.data() : { alerts: [], count: 0 });
+    },
+    err => {
+      console.error('subscribeToAlerts:', err);
       if (onError) onError(err);
     }
   );

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Daily Scanner  –  V2.9.0
+//  HaMatzpan · Daily Scanner  –  V2.9.3
 //  Precision Focus: MSTR · MSTY · IBIT · Excellence 1183441/1159243 · FX
 //
 //  V2.8.0:
@@ -21,6 +21,8 @@
 
 import https from "https";
 import { exec } from "child_process";
+import { BollingerBands, CCI } from "technicalindicators";
+import { WATCHLIST } from "./watchlist.js";
 
 const TODAY       = new Date().toISOString().slice(0, 10);
 const YESTERDAY   = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -750,6 +752,14 @@ async function sendWeeklyWhatsApp(summary) {
     }, "scanner_status/latest"),
   ]);
 
+  // ══ שלב 9: V2.9.3 — סורק תעלות ════════════════════════════
+  let channelAlerts = [];
+  try {
+    channelAlerts = await runChannelScan();
+  } catch (e) {
+    console.warn("  ⚠ סורק תעלות נכשל:", e.message);
+  }
+
   // ══ שלב 9: V2.9.0 — WhatsApp שבועי (יום שני בלבד) ══════════
   if (IS_MONDAY) {
     console.log("\n📱 V2.9.0 — שולח דוח WhatsApp שבועי (יום שני)...");
@@ -790,6 +800,7 @@ async function sendWeeklyWhatsApp(summary) {
     nasdaqPrice:     nasdaq.price,
     news:            allNews,
     prevEmailedUrls,
+    channelAlerts,   // V2.9.3: סורק תעלות
   });
 
   // שמור URLs שנשלחו (למניעת שליחה כפולה מחר)
@@ -819,11 +830,87 @@ async function sendWeeklyWhatsApp(summary) {
   );
 })();
 
+// ══ V2.9.3 — סורק תעלות: Yahoo History ══════════════════════
+// שולף נתוני OHLC של 3 חודשים עבור כל מנייה ברשימה
+async function yahooHistory(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=3mo`;
+  const res  = await httpsRequest(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const result = res.body?.chart?.result?.[0];
+  if (!result) throw new Error("No data");
+  const q = result.indicators.quote[0];
+  const combined = (result.timestamp || [])
+    .map((t, i) => ({ c: q.close[i], h: q.high[i], l: q.low[i] }))
+    .filter(r => r.c != null && r.h != null && r.l != null);
+  if (combined.length < 21) throw new Error(`רק ${combined.length} נרות`);
+  return {
+    closes: combined.map(r => r.c),
+    highs:  combined.map(r => r.h),
+    lows:   combined.map(r => r.l),
+  };
+}
+
+// ══ V2.9.3 — סורק תעלות: Channel Scan ════════════════════════
+// בודק כל מנייה ברשימה: Bollinger Bands (20,2SD) + CCI (20)
+// התראה: CCI < -100 ומחיר בתוך 5% מה-BB התחתון
+async function runChannelScan() {
+  console.log(`\n📡 [V2.9.3] סורק תעלות — ${WATCHLIST.length} מניות`);
+  const alerts = [];
+
+  for (const ticker of WATCHLIST) {
+    try {
+      const { closes, highs, lows } = await yahooHistory(ticker);
+
+      // Bollinger Bands (period=20, stdDev=2)
+      const bbArr  = BollingerBands.calculate({ period: 20, values: closes, stdDev: 2 });
+      const lastBB = bbArr[bbArr.length - 1]; // { upper, middle, lower }
+
+      // CCI (Commodity Channel Index, period=20)
+      const cciArr = CCI.calculate({ period: 20, high: highs, low: lows, close: closes });
+      const lastCCI = cciArr[cciArr.length - 1];
+
+      const lastClose     = closes[closes.length - 1];
+      const pctAboveLower = ((lastClose - lastBB.lower) / lastBB.lower) * 100;
+
+      // תנאי התראה: CCI < -100 ומחיר בתוך 5% מהקו התחתון
+      if (lastCCI < -100 && pctAboveLower <= 5) {
+        const alert = {
+          ticker,
+          close:        +lastClose.toFixed(2),
+          lowerBB:      +lastBB.lower.toFixed(2),
+          upperBB:      +lastBB.upper.toFixed(2),
+          cci:          Math.round(lastCCI),
+          pctFromLower: +pctAboveLower.toFixed(1),
+          scannedAt:    new Date().toISOString(),
+        };
+        alerts.push(alert);
+        console.log(`  🚨 ${ticker}: close=$${alert.close}, BB↓=$${alert.lowerBB}, CCI=${alert.cci}, מרחק=${alert.pctFromLower}%`);
+      }
+
+      // rate-limit קל — 250ms בין מניות
+      await new Promise(r => setTimeout(r, 250));
+    } catch (e) {
+      console.warn(`  ⚠️ ${ticker}: ${e.message}`);
+    }
+  }
+
+  // שמירה ל-Firestore: scanner_alerts/latest
+  await fsWrite("scanner_alerts", "latest", {
+    alerts,
+    date:      new Date().toISOString(),
+    count:     alerts.length,
+    scannedAt: new Date().toISOString(),
+  }, "scanner_alerts/latest");
+
+  console.log(`✅ סורק תעלות: ${alerts.length} התראות מתוך ${WATCHLIST.length} מניות`);
+  return alerts;
+}
+
 // ══ Gmail דוח בוקר — V2.9.1 ══════════════════════════════════
 // שולח מייל HTML דרך Gmail SMTP עם App Password
 // עובד אוטונומית מ-GitHub Actions ללא Claude
 async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstrChange,
-  nextDiv, projectedILS, shares, sp500Price, nasdaqPrice, news, prevEmailedUrls = [] }) {
+  nextDiv, projectedILS, shares, sp500Price, nasdaqPrice, news, prevEmailedUrls = [],
+  channelAlerts = [] }) {
   if (!GMAIL_APP_PASSWORD || !GMAIL_TO) {
     console.log("  ⏭ Gmail: GMAIL_APP_PASSWORD/GMAIL_TO לא מוגדרים — מדלג");
     return null;
@@ -901,7 +988,24 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
     <ul>${newsHtml}</ul>
   </div>` : ""}
 
-  <div class="footer">המצפן V2.9.1 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
+  <div class="card">
+    <div style="color:#f87171;font-weight:bold;margin-bottom:8px">🚨 סורק תעלות — מניות בתחתית</div>
+    ${channelAlerts.length === 0
+      ? `<p style="color:#64748b;margin:0">אין התראות כיום — כל המניות ברשימה רחוקות מתחתית הערוץ 🟢</p>`
+      : channelAlerts.map(a =>
+          `<p style="margin:4px 0;padding:6px 10px;background:#1a1a2e;border-radius:6px;border-right:3px solid #ef4444">
+            🚨 <b style="color:#fcd34d">${a.ticker}</b>
+            — $${a.close}
+            | BB↓ <span style="color:#f87171">$${a.lowerBB}</span>
+            | CCI <b style="color:#ef4444">${a.cci}</b>
+            | מרחק ${a.pctFromLower}% מתחתית
+          </p>`
+        ).join("")
+    }
+    <p style="color:#475569;font-size:11px;margin-top:8px">תנאי: CCI &lt; -100 &amp; מחיר בתוך 5% מ-Bollinger Band תחתון (20, 2SD)</p>
+  </div>
+
+  <div class="footer">המצפן V2.9.3 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
 </body></html>`;
 
     // שלח רק אם יש ידיעות חדשות או אם זו ריצה ראשונה (אין היסטוריה)
