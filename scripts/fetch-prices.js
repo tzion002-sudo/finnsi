@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Fetch Prices  –  V2.9.6
+//  HaMatzpan · Fetch Prices  –  V2.9.7
 //  סקריפט קל שמביא רק מחירים ושער דולר — ללא מייל, ללא סריקות
 //  מופעל on-demand מהדפדפן דרך GitHub API → כותב ל-Firestore
 //  Runtime: ~30 שניות
+//
+//  V2.9.7 שינויים:
+//  • הוסף IBIT (iShares Bitcoin Trust)
+//  • הוסר fallback ^GSPC×FX / ^IXIC×FX — ערכי מדד × FX אינם
+//    מחירי יחידת קרן; עדיף null מאשר ערך שגוי
+//  • שער דולר: USDILS=X (ראשי) עם fallback ל-ILS=X
 // ═══════════════════════════════════════════════════════════════
 
 import https from "https";
@@ -149,31 +155,45 @@ async function tasePrice(id) {
   return { price: null, currency: "ILS", source: "unavailable" };
 }
 
+// ── FX rate (USD → ILS) ──────────────────────────────────────────
+// USDILS=X הוא הטיקר הסטנדרטי ב-Yahoo Finance; ILS=X לפעמים מחזיר
+// ערך הפוך (ILS/USD ≈ 0.27) או ערך לא תקני — לכן USDILS=X ראשוני.
+async function fxUsdIls() {
+  // ניסיון 1: USDILS=X
+  const r1 = await yahooPrice("USDILS=X");
+  if (r1.price != null && r1.price > 2 && r1.price < 10) {
+    return { usdIls: r1.price, source: r1.source + " (USDILS=X)" };
+  }
+  // ניסיון 2: ILS=X (fallback)
+  const r2 = await yahooPrice("ILS=X");
+  if (r2.price != null && r2.price > 2 && r2.price < 10) {
+    return { usdIls: r2.price, source: r2.source + " (ILS=X)" };
+  }
+  console.log("  ⚠ USD/ILS: לא נמצא שער תקני — שמירה על הערך הקיים");
+  return { usdIls: null, source: "unavailable" };
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 async function main() {
   const now = new Date().toISOString();
-  console.log(`\n⚡ [V2.9.6] Fetch Prices — ${now}`);
+  console.log(`\n⚡ [V2.9.7] Fetch Prices — ${now}`);
   console.log("══════════════════════════════════════════");
 
-  const [mstr, msty, fx, sp500, nasdaq] = await Promise.all([
+  const [mstr, msty, fx, sp500, nasdaq, ibit] = await Promise.all([
     yahooPrice("MSTR"),
     yahooPrice("MSTY"),
-    yahooPrice("ILS=X"),
-    tasePrice("1183441"),
-    tasePrice("1159243"),
+    fxUsdIls(),
+    tasePrice("1183441"),   // קרן מחקה S&P500 בבורסת ת"א (אגורות → ÷100)
+    tasePrice("1159243"),   // קרן מחקה Nasdaq בבורסת ת"א (אגורות → ÷100)
+    yahooPrice("IBIT"),     // iShares Bitcoin Trust ETF (USD)
   ]);
 
-  const usdIls = fx.price;
+  const usdIls = fx.usdIls;
 
-  // SP500/NASDAQ fallback: אם ה-.TA נכשל — נמיר מ-USD
-  const sp500Final  = sp500.price  != null ? sp500  : await (async () => {
-    const r = await yahooPrice("^GSPC");
-    return r.price && usdIls ? { ...r, price: parseFloat((r.price * usdIls).toFixed(2)), currency: "ILS", source: r.source + " ×FX", isFallback: true } : r;
-  })();
-  const nasdaqFinal = nasdaq.price != null ? nasdaq : await (async () => {
-    const r = await yahooPrice("^IXIC");
-    return r.price && usdIls ? { ...r, price: parseFloat((r.price * usdIls).toFixed(2)), currency: "ILS", source: r.source + " ×FX", isFallback: true } : r;
-  })();
+  // ⚠️  SP500 / Nasdaq: אין fallback ל-^GSPC×FX / ^IXIC×FX
+  //  ערכי המדד (5,800 / 18,000) × FX ≠ מחיר יחידת הקרן (~43₪ / ~4,856₪)
+  //  אם ה-TASE fetch נכשל — נשמור null; הערך הקודם יישאר ב-Firestore
+  //  (fsWrite מדלג על null כדי לשמר את הערך הידוע האחרון)
 
   const payload = {
     timestamp:    now,
@@ -181,8 +201,9 @@ async function main() {
     mstr:  { price: mstr.price,  changePct: mstr.changePct,  priceSource: mstr.source  },
     msty:  { price: msty.price,  changePct: msty.changePct,  priceSource: msty.source  },
     fx:    { usdIls: usdIls,     source: fx.source },
-    sp500: { price: sp500Final.price,  priceSource: sp500Final.source,  isFallback: !!sp500Final.isFallback  },
-    nasdaq:{ price: nasdaqFinal.price, priceSource: nasdaqFinal.source, isFallback: !!nasdaqFinal.isFallback },
+    sp500: { price: sp500.price,  priceSource: sp500.source,  isFallback: false },
+    nasdaq:{ price: nasdaq.price, priceSource: nasdaq.source, isFallback: false },
+    ibit:  { price: ibit.price,  changePct: ibit.changePct,  priceSource: ibit.source  },
   };
 
   await fsWrite("market_data", "latest", payload);
@@ -193,7 +214,8 @@ async function main() {
   });
 
   console.log("\n✅ מחירים נשמרו ב-Firestore market_data/latest");
-  console.log(`   MSTR: $${mstr.price ?? "N/A"}  |  MSTY: $${msty.price ?? "N/A"}  |  USD/ILS: ₪${usdIls ?? "N/A"}`);
+  console.log(`   MSTR: $${mstr.price ?? "N/A"}  |  MSTY: $${msty.price ?? "N/A"}  |  IBIT: $${ibit.price ?? "N/A"}  |  USD/ILS: ₪${usdIls ?? "N/A"}`);
+  console.log(`   SP500: ₪${sp500.price ?? "N/A"}  |  Nasdaq: ₪${nasdaq.price ?? "N/A"}`);
 }
 
 main().catch(e => { console.error("❌ fetch-prices failed:", e); process.exit(1); });
