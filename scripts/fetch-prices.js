@@ -37,28 +37,57 @@ function httpsGet(url, options = {}) {
   });
 }
 
-// ── Firestore write ──────────────────────────────────────────────
+// ── Firestore write (PATCH + updateMask — NEVER replaces whole document) ────
+//
+// ⚠️  DATA-LOSS PREVENTION:
+//   • Uses ?updateMask.fieldPaths=<key> for every top-level field so that
+//     fields NOT included in this payload are PRESERVED in Firestore.
+//   • Null/undefined fields are silently skipped — a failed price fetch
+//     will NOT overwrite the last known-good value in the document.
+//   • This is especially critical for market_data/latest: if SP500 fetch
+//     fails today, yesterday's confirmed price stays visible in the app.
 async function fsWrite(col, docId, payload) {
   const fields = {};
+  const writtenKeys = [];
+
   for (const [k, v] of Object.entries(payload)) {
+    // Skip nulls — don't clobber last known-good value
     if (v === null || v === undefined) continue;
+
     if (typeof v === "number")  fields[k] = { doubleValue: v };
     else if (typeof v === "boolean") fields[k] = { booleanValue: v };
     else if (typeof v === "object" && !Array.isArray(v)) {
-      // nested object → mapValue
+      // nested map — only include sub-keys that are non-null
       const inner = {};
+      let innerHasData = false;
       for (const [ik, iv] of Object.entries(v)) {
         if (iv == null) continue;
         if (typeof iv === "number")  inner[ik] = { doubleValue: iv };
         else if (typeof iv === "boolean") inner[ik] = { booleanValue: iv };
         else inner[ik] = { stringValue: String(iv) };
+        innerHasData = true;
       }
+      if (!innerHasData) continue; // skip empty maps (e.g. all-null price object)
       fields[k] = { mapValue: { fields: inner } };
     }
     else fields[k] = { stringValue: String(v) };
+
+    writtenKeys.push(k);
   }
-  const url = `${FIRESTORE_BASE}/${col}/${docId}?key=${FIREBASE.apiKey}`;
-  await httpsGet(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fields }) });
+
+  if (writtenKeys.length === 0) {
+    console.log(`  ⚠ fsWrite(${col}/${docId}): nothing to write — all fields null, skipping`);
+    return;
+  }
+
+  // Build updateMask so only these specific fields are touched
+  const maskParams = writtenKeys.map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+  const url = `${FIRESTORE_BASE}/${col}/${docId}?key=${FIREBASE.apiKey}&${maskParams}`;
+  await httpsGet(url, {
+    method:  "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ fields }),
+  });
 }
 
 // ── Yahoo Finance price ──────────────────────────────────────────

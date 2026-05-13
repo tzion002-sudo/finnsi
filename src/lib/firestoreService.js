@@ -205,12 +205,39 @@ export async function getSettings() {
 
 /**
  * Save (merge) the global settings document.
+ *
+ * ⚠️  DATA-LOSS PREVENTION — CRITICAL RULES:
+ *  1. ALWAYS uses setDoc(..., { merge: true }) — NEVER replaces the whole document.
+ *  2. NEVER call this with an empty object or an object that is missing key user-data
+ *     fields (loans, excellenceLongTerm, etc.) — that would silently erase those fields.
+ *  3. NEVER write to settings/global via the Firestore REST API PATCH without an
+ *     updateMask.  The Firebase SDK (this function) is the ONLY safe writer.
+ *  4. Code-driven defaults (DEFAULT_LOANS, etc.) MUST NOT be saved until the cloud
+ *     data has been fully hydrated (see settingsHydratedRef in Dashboard.jsx).
  */
 export async function saveSettings(settings) {
   if (!isFirebaseReady()) {
     lsSave('compass_settings', settings);
     return;
   }
+
+  // ── Guard: never save a suspiciously empty payload ───────────────────────
+  // If none of the user-data arrays are present, this is almost certainly a
+  // premature save (race condition before cloud data arrived).  Abort silently.
+  const hasUserData =
+    Array.isArray(settings.loans)                ||
+    Array.isArray(settings.savings)              ||
+    Array.isArray(settings.excellenceLongTerm)   ||
+    Array.isArray(settings.excellenceTradeJournal)||
+    Array.isArray(settings.mstyDividends)        ||
+    typeof settings.mstyPrice === "number"       ||
+    typeof settings.githubPat === "string";
+
+  if (!hasUserData) {
+    console.warn("⛔ saveSettings: payload has no user data — save aborted to prevent data loss", settings);
+    return;
+  }
+
   await setDoc(settingsRef(), { ...settings, updatedAt: serverTimestamp() }, { merge: true });
 }
 

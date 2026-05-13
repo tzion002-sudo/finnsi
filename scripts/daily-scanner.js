@@ -403,11 +403,37 @@ async function fsRead(collectionPath, docId) {
   return null;
 }
 
-/** כתיבה/עדכון מסמך ב-Firestore (PATCH+merge) */
+/**
+ * כתיבה/עדכון מסמך ב-Firestore (PATCH + updateMask)
+ *
+ * ⚠️  DATA-LOSS PREVENTION:
+ *  • Uses updateMask.fieldPaths for every key in payload, so ONLY those fields
+ *    are touched.  Fields absent from payload are left unchanged in Firestore.
+ *  • Null/undefined values are SKIPPED — a failed price fetch will NOT erase
+ *    the last known-good value.  (e.g. SP500 fetch fails → old ILS price stays)
+ *  • NEVER writes to families/mizrahi/settings/global — that document belongs
+ *    exclusively to the Firebase SDK (firestoreService.js → saveSettings).
+ */
 async function fsWrite(collectionPath, docId, payload, label = "") {
-  const url = `${FIRESTORE_BASE}/${collectionPath}/${docId}?key=${FIREBASE.apiKey}`;
+  // Build document, skipping null/undefined to preserve existing values
+  const fields = {};
+  const writtenKeys = [];
+  for (const [k, v] of Object.entries(payload)) {
+    if (v === null || v === undefined) continue;
+    fields[k] = toFsValue(v);
+    writtenKeys.push(k);
+  }
+
+  if (writtenKeys.length === 0) {
+    console.log(`  ⚠ fsWrite(${label || collectionPath + "/" + docId}): all fields null — skipping write`);
+    return false;
+  }
+
+  // Append updateMask to touch only the specified fields
+  const maskParams = writtenKeys.map(k => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+  const url = `${FIRESTORE_BASE}/${collectionPath}/${docId}?key=${FIREBASE.apiKey}&${maskParams}`;
   try {
-    const { status, body } = await httpsRequest(url, { method: "PATCH" }, toFsDoc(payload));
+    const { status, body } = await httpsRequest(url, { method: "PATCH" }, { fields });
     if (status === 200) { console.log(`  ✅ Firestore ${label || collectionPath + "/" + docId} עודכן`); return true; }
     console.warn(`  ⚠ Firestore ${label} שגיאה ${status}:`, body?.error?.message || "");
     return false;
