@@ -1093,29 +1093,33 @@ const LoansTab = ({ loans, setLoans }) => {
                       </div>
                     </td>
                     <td className="p-2">
-                      <input type="number" value={l.originalAmount}
+                      <input type="text" inputMode="numeric" value={l.originalAmount || ""}
                         onChange={e => updateLoan(l.id, "originalAmount", e.target.value)}
-                        className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-amber-200 font-mono text-sm w-28 focus:border-rose-500 focus:outline-none"/>
+                        placeholder="0"
+                        className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-amber-200 font-mono text-sm w-32 focus:border-rose-500 focus:outline-none"/>
                     </td>
                     <td className="p-2">
                       <div className="flex flex-col gap-1">
-                        <input type="number" value={l.currentBalance}
+                        <input type="text" inputMode="numeric" value={l.currentBalance || ""}
                           onChange={e => updateLoan(l.id, "currentBalance", e.target.value)}
-                          className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-rose-200 font-mono text-sm w-28 focus:border-rose-500 focus:outline-none"/>
+                          placeholder="0"
+                          className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-rose-200 font-mono text-sm w-32 focus:border-rose-500 focus:outline-none"/>
                         <div className="h-1 bg-slate-800 rounded overflow-hidden">
                           <div className="h-full bg-emerald-500" style={{width:`${Math.min(100, progress)}%`}}/>
                         </div>
                       </div>
                     </td>
                     <td className="p-2">
-                      <input type="number" step="0.01" value={l.interestRate}
+                      <input type="text" inputMode="decimal" value={l.interestRate || ""}
                         onChange={e => updateLoan(l.id, "interestRate", e.target.value)}
+                        placeholder="0.0"
                         className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-orange-200 font-mono text-sm w-20 focus:border-rose-500 focus:outline-none"/>
                     </td>
                     <td className="p-2">
-                      <input type="number" value={l.monthlyPayment}
+                      <input type="text" inputMode="numeric" value={l.monthlyPayment || ""}
                         onChange={e => updateLoan(l.id, "monthlyPayment", e.target.value)}
-                        className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-orange-200 font-mono text-sm w-24 focus:border-rose-500 focus:outline-none"/>
+                        placeholder="0"
+                        className="bg-slate-900/60 border border-slate-700 rounded px-2 py-1 text-orange-200 font-mono text-sm w-28 focus:border-rose-500 focus:outline-none"/>
                     </td>
                     <td className="p-2">
                       <input type="date" value={l.endDate || ""}
