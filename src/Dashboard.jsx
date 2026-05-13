@@ -17,7 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.9.4
+//  "המצפן" – HaMatzpan V2.9.5
+//  V2.9.5 — Fix: duplicate news dedup + live price button (Yahoo protection + Israeli securities)
 //  V2.9.4 — Channel Scanner: BB + Linear Regression Channel + CCI · Chart image per alert (QuickChart)
 //  V2.9.2 — Remove FIRE tab · Gmail news dedup + clickable links · Fix duplicate dividends backfill
 //  V2.8.0 — Morning Brief smart ack · No duplicate divs · Agora÷100 fix · IBIT USD P&L · GitHub Actions · News Hebrew labels
@@ -33,7 +34,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.4";
+const APP_VERSION = "V2.9.5";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2592,9 +2593,12 @@ const CompoundProjection = ({ asset }) => {
 
 // V2.7.0 — רק 3 טיקרים רלוונטיים (IBIT/SP500/Nasdaq הוסרו — תמיד N/A ומבלבלים)
 const LIVE_TRACKS = [
-  { id:"MSTY", ticker:"MSTY",  label:"MSTY",    currency:"USD", flag:"📈" },
-  { id:"MSTR", ticker:"MSTR",  label:"MSTR",    currency:"USD", flag:"🟧" },
-  { id:"FX",   ticker:"ILS=X", label:"USD/ILS", currency:"FX",  flag:"💱" },
+  { id:"MSTY",   ticker:"MSTY",        label:"MSTY",             currency:"USD", flag:"📈" },
+  { id:"MSTR",   ticker:"MSTR",        label:"MSTR",             currency:"USD", flag:"🟧" },
+  { id:"FX",     ticker:"ILS=X",       label:"USD/ILS",          currency:"FX",  flag:"💱" },
+  // V2.9.5: ניירות ישראלים — Yahoo מחזיר מחיר בשקלים ישירות
+  { id:"SP500",  ticker:"1183441.TA",  label:"אקסלנס S&P",       currency:"ILS", flag:"🇺🇸", fallback:"^GSPC"  },
+  { id:"NASDAQ", ticker:"1159243.TA",  label:"אקסלנס נאסד\"ק",  currency:"ILS", flag:"💻", fallback:"^IXIC"  },
 ];
 
 // מיפוי: id → שדה ב-lastScan (לנתון אחרון ידוע במקרה של חסימה)
@@ -2654,6 +2658,8 @@ function useLiveMarket() {
   const [fetchedAt, setFetchedAt] = useState(null);
   const [fetching, setFetching]   = useState(false);
   const [source, setSource]       = useState("idle"); // 'firestore' | 'yahoo' | 'mixed' | 'idle'
+  // V2.9.5: כשהמשתמש לחץ "עדכן מחירים" ו-Yahoo החזיר נתונים — הגן עליהם 5 דקות מדריסת Firestore
+  const yahooFreshUntilRef = useRef(0);
 
   // ── מיפוי מ-market_data/latest ל-mapping של LIVE_TRACKS ──
   const fromFirestore = useCallback((md) => {
@@ -2677,17 +2683,25 @@ function useLiveMarket() {
     const unsub = subscribeToMarketData((md) => {
       const mapped = fromFirestore(md);
       if (!mapped) return;
-      // V2.6.3: Firestore הוא מקור האמת — תמיד מנצח. Yahoo (browser) לא אמין בגלל CORS.
-      // אם Yahoo הצליח להביא ערך לא-null, הוא כבר נכתב ישירות ל-setPrices() בנפרד.
+      // V2.9.5: אם המשתמש רק לחץ "עדכן מחירים" ו-Yahoo עדיין "טרי" (5 דקות) —
+      // אל תדרוס את נתוני Yahoo החיים בנתוני Firestore הישנים מהסריקה הבוקרית.
+      const yahooIsProtected = Date.now() < yahooFreshUntilRef.current;
       setPrices(prev => {
         const merged = { ...prev };
         for (const [k, v] of Object.entries(mapped)) {
-          if (v != null) merged[k] = v;  // Firestore תמיד דורס — הסקנר הוא הפקיד
+          if (v != null) {
+            // אם Yahoo הביא נתון טרי לאותו מפתח — אל תדרוס
+            if (yahooIsProtected && prev[k]?.source === "Yahoo Finance") continue;
+            merged[k] = v;
+          }
         }
         return merged;
       });
-      setFetchedAt(md.timestamp || new Date().toISOString());
-      setSource(prev => prev === "yahoo" ? "mixed" : "firestore");
+      // עדכן timestamp רק אם Firestore הוא המקור הפעיל
+      if (!yahooIsProtected) {
+        setFetchedAt(md.timestamp || new Date().toISOString());
+        setSource(prev => prev === "yahoo" ? "mixed" : "firestore");
+      }
     });
     return () => { try { unsub?.(); } catch {} };
   }, [fromFirestore]);
@@ -2713,14 +2727,14 @@ function useLiveMarket() {
         results[id] = { ...r, price: parseFloat((r.price * fxRate).toFixed(2)), currency: "ILS", source: `${r.source} × FX₪` };
       }
     }
-    // Yahoo הצליח? מחק את ה-_stale מ-Firestore values, הוסף מה שהתקבל
+    // Yahoo הצליח? עדכן מחירים והגן עליהם 5 דקות מדריסת Firestore
     if (Object.keys(results).length > 0) {
+      yahooFreshUntilRef.current = Date.now() + 5 * 60 * 1000; // הגנה 5 דקות
       setPrices(prev => ({ ...prev, ...results }));
       setFetchedAt(new Date().toISOString());
-      setSource(prev => prev === "firestore" ? "mixed" : "yahoo");
+      setSource("yahoo");
     } else {
-      // Yahoo נכשל לחלוטין — סמן את ה-Firestore values כ-stale רק אם עברו מעל 4 שעות
-      // (הסקנר רץ 08:00, אם השעה אחרי 13:00 הנתון מתחיל להיות ישן)
+      // Yahoo נכשל לחלוטין — מציג נתוני Firestore עם הודעה מתאימה
       console.warn("Yahoo browser fetch failed — relying on Firestore market_data/latest");
     }
     setFetching(false);

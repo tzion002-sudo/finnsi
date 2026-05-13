@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════
-//  HaMatzpan · Daily Scanner  –  V2.9.4
+//  HaMatzpan · Daily Scanner  –  V2.9.5
 //  Precision Focus: MSTR · MSTY · IBIT · Excellence 1183441/1159243 · FX
 //
 //  V2.8.0:
@@ -803,10 +803,11 @@ async function sendWeeklyWhatsApp(summary) {
     channelAlerts,   // V2.9.3: סורק תעלות
   });
 
-  // שמור URLs שנשלחו (למניעת שליחה כפולה מחר)
+  // שמור URLs שנשלחו ל-scanner_status/latest (למניעת שליחה כפולה מחר)
+  // V2.9.5 FIX: תוקן סדר ארגומנטים שגוי שגרם לכל הכתבות להישלח מחדש בכל ריצה
   if (Array.isArray(sentUrls) && sentUrls.length > 0) {
     try {
-      await fsWrite({ lastEmailedNewsUrls: sentUrls }, "scanner_status/email_history");
+      await fsWrite("scanner_status", "latest", { lastEmailedNewsUrls: sentUrls }, "scanner_status/latest (news history)");
     } catch (e) { console.warn("  ⚠ שמירת היסטוריית מיילים נכשלה:", e.message); }
   }
 
