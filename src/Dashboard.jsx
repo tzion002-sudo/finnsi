@@ -17,7 +17,8 @@ import {
 } from "lucide-react";
 
 // ══════════════════════════════════════════════════════════════
-//  "המצפן" – HaMatzpan V2.9.5
+//  "המצפן" – HaMatzpan V2.9.6
+//  V2.9.6 — "עדכן מחירים" → GitHub Actions on-demand scan (fetch-prices.js) → Firestore → live
 //  V2.9.5 — Fix: duplicate news dedup + live price button (Yahoo protection + Israeli securities)
 //  V2.9.4 — Channel Scanner: BB + Linear Regression Channel + CCI · Chart image per alert (QuickChart)
 //  V2.9.2 — Remove FIRE tab · Gmail news dedup + clickable links · Fix duplicate dividends backfill
@@ -34,7 +35,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.5";
+const APP_VERSION = "V2.9.6";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2658,7 +2659,8 @@ function useLiveMarket() {
   const [fetchedAt, setFetchedAt] = useState(null);
   const [fetching, setFetching]   = useState(false);
   const [source, setSource]       = useState("idle"); // 'firestore' | 'yahoo' | 'mixed' | 'idle'
-  // V2.9.5: כשהמשתמש לחץ "עדכן מחירים" ו-Yahoo החזיר נתונים — הגן עליהם 5 דקות מדריסת Firestore
+  // V2.9.6: on-demand GitHub Actions trigger state
+  const [ghTrigger, setGhTrigger] = useState("idle"); // 'idle'|'triggering'|'pending'|'error'
   const yahooFreshUntilRef = useRef(0);
 
   // ── מיפוי מ-market_data/latest ל-mapping של LIVE_TRACKS ──
@@ -2702,58 +2704,59 @@ function useLiveMarket() {
         setFetchedAt(md.timestamp || new Date().toISOString());
         setSource(prev => prev === "yahoo" ? "mixed" : "firestore");
       }
+      // V2.9.6: אם הייתה בקשת on-demand וה-scanner סיים — נקה את ה-pending state
+      if (md.updatedBy === "on-demand") {
+        setGhTrigger(prev => prev === "pending" ? "idle" : prev);
+      }
     });
     return () => { try { unsub?.(); } catch {} };
   }, [fromFirestore]);
 
-  // ── Yahoo Finance refresh (best-effort; ייכשל לעיתים קרובות בגלל CORS) ──
-  const doFetch = useCallback(async () => {
-    if (fetching) return;
-    setFetching(true);
-    const results = {};
-    await Promise.allSettled(
-      LIVE_TRACKS.map(async (t) => {
-        const { price, source: src, currency, isFallback } = await fetchYahooPrice(t.ticker, t.fallback || null);
-        if (price != null) {
-          results[t.id] = { price, source: src, currency: currency || t.currency, label: t.label, flag: t.flag, ticker: t.ticker, isFallback: !!isFallback };
+  // ── V2.9.6: on-demand scan דרך GitHub Actions ──────────────────
+  // כשהמשתמש לוחץ "עדכן מחירים" → מפעיל workflow ב-GitHub → כ-90 שניות
+  // → fetch-prices.js כותב ל-Firestore market_data/latest → onSnapshot מעדכן UI
+  const triggerOnDemandScan = useCallback(async () => {
+    if (ghTrigger === "triggering" || ghTrigger === "pending") return;
+    setGhTrigger("triggering");
+    try {
+      // קרא PAT מ-Firestore settings
+      const settings = await getSettings();
+      const pat = settings?.githubPat;
+      if (!pat) throw new Error("GitHub PAT לא נמצא בהגדרות Firestore");
+
+      const res = await fetch(
+        "https://api.github.com/repos/tzion002-sudo/finnsi/actions/workflows/on-demand-prices.yml/dispatches",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${pat}`,
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github.v3+json",
+          },
+          body: JSON.stringify({ ref: "main", inputs: { source: "app" } }),
         }
-      })
-    );
-    // FX conversion: Israeli papers fallback to USD → multiply by USD/ILS
-    const fxRate = results.FX?.price;
-    for (const id of ["SP500", "NASDAQ"]) {
-      const r = results[id];
-      if (r?.isFallback && r.price != null && r.currency !== "ILS" && fxRate) {
-        results[id] = { ...r, price: parseFloat((r.price * fxRate).toFixed(2)), currency: "ILS", source: `${r.source} × FX₪` };
+      );
+      if (res.status === 204) {
+        setGhTrigger("pending"); // ממתין לעדכון Firestore (כ-90 שניות)
+        // timeout: אם אחרי 3 דקות אין עדכון — חזור ל-idle
+        setTimeout(() => setGhTrigger(prev => prev === "pending" ? "idle" : prev), 3 * 60 * 1000);
+      } else {
+        throw new Error(`GitHub API: status ${res.status}`);
       }
+    } catch (e) {
+      console.error("triggerOnDemandScan:", e.message);
+      setGhTrigger("error");
+      setTimeout(() => setGhTrigger("idle"), 5000);
     }
-    // Yahoo הצליח? עדכן מחירים והגן עליהם 5 דקות מדריסת Firestore
-    if (Object.keys(results).length > 0) {
-      yahooFreshUntilRef.current = Date.now() + 5 * 60 * 1000; // הגנה 5 דקות
-      setPrices(prev => ({ ...prev, ...results }));
-      setFetchedAt(new Date().toISOString());
-      setSource("yahoo");
-    } else {
-      // Yahoo נכשל לחלוטין — מציג נתוני Firestore עם הודעה מתאימה
-      console.warn("Yahoo browser fetch failed — relying on Firestore market_data/latest");
-    }
-    setFetching(false);
-  }, [fetching]);
+  }, [ghTrigger]);
 
-  // ── רענון פעם בכניסה + רענון אוטומטי כל 30 דק' (במקום פעם ב-09:00) ──
-  useEffect(() => {
-    doFetch();
-    const interval = setInterval(doFetch, 30 * 60 * 1000); // 30min
-    return () => clearInterval(interval);
-  }, []); // eslint-disable-line
-
-  return { prices, fetchedAt, fetching, source, refresh: doFetch };
+  return { prices, fetchedAt, fetching: ghTrigger !== "idle", ghTrigger, source, refresh: triggerOnDemandScan };
 }
 
 /** LiveMarketBar — רצועת מחירים בזמן אמת בראש הדשבורד
- *  V2.5.1: כשמחיר חי לא זמין, מציג מחיר אחרון ידוע (staleData) עם אייקון 🕐
+ *  V2.9.6: כפתור "עדכן מחירים" מפעיל GitHub Actions → Firestore → onSnapshot
  */
-const LiveMarketBar = ({ prices, fetchedAt, fetching, onRefresh, staleData }) => {
+const LiveMarketBar = ({ prices, fetchedAt, fetching, ghTrigger, onRefresh, staleData }) => {
   const timeStr = fetchedAt
     ? new Date(fetchedAt).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" })
     : null;
@@ -2764,7 +2767,13 @@ const LiveMarketBar = ({ prices, fetchedAt, fetching, onRefresh, staleData }) =>
     <div className="flex items-center gap-2 bg-slate-900/60 border border-slate-700/50 rounded-xl px-3 py-2 mb-4 overflow-x-auto scrollbar-hide flex-wrap">
       <div className="flex items-center gap-1.5 text-[10px] text-slate-400 flex-shrink-0">
         <Activity size={10} className={fetching ? "animate-spin text-cyan-400" : "text-emerald-400"}/>
-        <span className="font-semibold">{fetching ? "מעדכן..." : timeStr ? `עודכן ${timeStr}` : "—"}</span>
+        <span className="font-semibold">
+          {ghTrigger === "triggering" ? "🚀 מפעיל סריקה..." :
+           ghTrigger === "pending"    ? "⏳ ~90 שניות..." :
+           ghTrigger === "error"      ? "❌ שגיאה" :
+           fetching                   ? "מעדכן..." :
+           timeStr                    ? `עודכן ${timeStr}` : "—"}
+        </span>
       </div>
       {tracks.map(t => {
         const livePrice  = t.price;
@@ -2800,11 +2809,17 @@ const LiveMarketBar = ({ prices, fetchedAt, fetching, onRefresh, staleData }) =>
       })}
       <button
         onClick={onRefresh}
-        disabled={fetching}
-        className="flex items-center gap-1 text-[10px] bg-cyan-900/30 border border-cyan-700/40 text-cyan-300 hover:text-cyan-100 px-2 py-1 rounded-lg transition-colors flex-shrink-0"
-        title="רענן מחירים עכשיו"
+        disabled={ghTrigger === "triggering" || ghTrigger === "pending"}
+        className={`flex items-center gap-1 text-[10px] border px-2 py-1 rounded-lg transition-colors flex-shrink-0 ${
+          ghTrigger === "pending"    ? "bg-amber-900/30 border-amber-700/40 text-amber-300 cursor-wait" :
+          ghTrigger === "triggering" ? "bg-cyan-900/50 border-cyan-700/40 text-cyan-300 cursor-wait" :
+          ghTrigger === "error"      ? "bg-red-900/30 border-red-700/40 text-red-300" :
+                                       "bg-cyan-900/30 border-cyan-700/40 text-cyan-300 hover:text-cyan-100"
+        }`}
+        title="עדכן מחירים דרך GitHub Actions (~90 שניות)"
       >
-        <Radio size={9}/> רענן
+        <Radio size={9} className={ghTrigger === "pending" ? "animate-spin" : ""}/>
+        {ghTrigger === "pending" ? "מחכה..." : ghTrigger === "triggering" ? "מפעיל..." : "עדכן"}
       </button>
     </div>
   );
@@ -3776,7 +3791,7 @@ export default function HaMatzpanGemelnet() {
   const suppressSaveToastRef = useRef(false);
 
   // V2.1.9 — Live Market Prices hook (IBIT, MSTY, SP500, Nasdaq, FX)
-  const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, refresh: refreshMarket } = useLiveMarket();
+  const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, ghTrigger: marketGhTrigger, refresh: refreshMarket } = useLiveMarket();
 
   // V2.1.9 — עדכון אוטומטי של מחיר MSTY + שער USD/ILS מ-LiveMarket (אם אין _manualLock)
   // V2.5.2 — Firestore-Only: עדכון מחיר MSTY + FX ב-state בלבד (ללא lsSave)
@@ -4495,6 +4510,7 @@ export default function HaMatzpanGemelnet() {
             prices={liveMarket}
             fetchedAt={marketFetchedAt}
             fetching={marketFetching}
+            ghTrigger={marketGhTrigger}
             onRefresh={refreshMarket}
             staleData={lastScan}
           />

@@ -1,0 +1,37 @@
+name: On-Demand Price Fetch
+
+on:
+  workflow_dispatch:
+    # מופעל מהאפליקציה כשהמשתמש לוחץ "עדכן מחירים"
+    # GitHub API → workflow_dispatch → fetch-prices.js → Firestore
+    inputs:
+      source:
+        description: 'מקור הטריגר (app / manual)'
+        required: false
+        default: 'app'
+
+jobs:
+  fetch-prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Fetch live prices → Firestore
+        run: node scripts/fetch-prices.js
+        env:
+          NODE_ENV: production
+
+      - name: Done
+        run: echo "✅ Prices updated at $(TZ='Asia/Jerusalem' date '+%H:%M:%S') Israel time"
