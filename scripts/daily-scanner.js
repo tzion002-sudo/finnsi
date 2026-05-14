@@ -819,7 +819,7 @@ async function sendWeeklyWhatsApp(summary) {
     usdIls:          fx.price,
     mstyChange:      dailyChg.msty,
     mstrChange:      dailyChg.mstr,
-    nextDiv:         nextDividend ? { amount: nextDividend.amount, exDate: nextDividend.date } : null,
+    nextDiv:         nextDividend ? { amount: nextDividend.amount, exDate: nextDividend.exDate } : null,
     projectedILS:    projectedDividend?.netILS ?? null,
     shares:          projectedDividend?.shares ?? 118,
     sp500Price:      sp500.price,
@@ -829,8 +829,8 @@ async function sendWeeklyWhatsApp(summary) {
     channelAlerts,   // V2.9.3: סורק תעלות
   });
 
-  // שמור URLs שנשלחו ל-scanner_status/latest (למניעת שליחה כפולה מחר)
-  // V2.9.5 FIX: תוקן סדר ארגומנטים שגוי שגרם לכל הכתבות להישלח מחדש בכל ריצה
+  // V2.9.6: שמור את האיחוד המצטבר של כל מה שנשלח (URLs + מפתחות כותרת)
+  // שימוש ב-allSentKeys (מוחזר מ-sendMorningEmail) — כולל ישן+חדש, מגבל ל-100
   if (Array.isArray(sentUrls) && sentUrls.length > 0) {
     try {
       await fsWrite("scanner_status", "latest", { lastEmailedNewsUrls: sentUrls }, "scanner_status/latest (news history)");
@@ -1099,10 +1099,20 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
     const mstyChgStr  = mstyChange != null ? `${mstyChange >= 0 ? "▲" : "▼"} ${Math.abs(mstyChange)}%` : "";
     const mstrChgStr  = mstrChange != null ? `${mstrChange >= 0 ? "▲" : "▼"} ${Math.abs(mstrChange)}%` : "";
 
-    // V2.9.2 — סנן ידיעות שכבר נשלחו (לפי URL) + הגבל ל-5 חדשות
-    const prevUrls = new Set(prevEmailedUrls || []);
-    const newNews  = (news || []).filter(n => n.url && !prevUrls.has(n.url)).slice(0, 5);
-    const sentUrls = newNews.map(n => n.url).filter(Boolean);
+    // V2.9.6 — סנן ידיעות שכבר נשלחו
+    // dedup לפי URL (ידיעות Yahoo) או לפי כותרת (הכרזות YieldMax שאין להן URL)
+    // prevEmailedUrls מכיל גם URLs ("https://...") וגם מפתחות כותרת ("title:...")
+    const prevKeys = new Set(prevEmailedUrls || []);
+    const newNews  = (news || [])
+      .filter(n => {
+        const key = n.url ? n.url : `title:${n.title}`;
+        return !prevKeys.has(key); // הכרזות ללא URL — dedup לפי כותרת
+      })
+      .slice(0, 5);
+    // מפתחות למה שנשלח עכשיו
+    const sentKeys = newNews.map(n => n.url ? n.url : `title:${n.title}`).filter(Boolean);
+    // ✅ צבור (אל תמחק) — שמור איחוד של ישן + חדש, מגבל ל-100 כדי שלא יגדל לאין סוף
+    const allSentKeys = [...new Set([...(prevEmailedUrls || []), ...sentKeys])].slice(-100);
 
     // HTML body — V2.9.2: כל כותרת = קישור לכתבה המקורית
     const newsHtml = newNews.map(n =>
@@ -1201,11 +1211,8 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
   <div class="footer">המצפן V2.9.4 · HaMatzpan · מופעל אוטומטית ע"י GitHub Actions</div>
 </body></html>`;
 
-    // שלח רק אם יש ידיעות חדשות או אם זו ריצה ראשונה (אין היסטוריה)
-    if (newNews.length === 0 && prevEmailedUrls.length > 0) {
-      console.log("  ℹ Gmail: אין ידיעות חדשות מאז המייל האחרון — לא נשלח");
-      return sentUrls;
-    }
+    // V2.9.6: המייל נשלח תמיד — הוא דוח בוקר של מחירים + דיבידנד, לא רק חדשות
+    // (גם ביום שאין כתבות חדשות, המחיר והדיבידנד חשובים)
     await transporter.sendMail({
       from:    `"📊 המצפן" <${GMAIL_FROM}>`,
       to:      GMAIL_TO,
@@ -1213,7 +1220,7 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
       html,
     });
     console.log(`  ✅ Gmail: דוח בוקר נשלח אל ${GMAIL_TO} (${newNews.length} ידיעות חדשות)`);
-    return sentUrls;
+    return allSentKeys;
   } catch (e) {
     console.warn("  ⚠ Gmail שליחה נכשלה:", e.message);
     return null;
