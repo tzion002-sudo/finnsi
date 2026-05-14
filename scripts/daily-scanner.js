@@ -265,20 +265,10 @@ async function yieldmaxDividend() {
     dividends.sort((a, b) => b.exDate.localeCompare(a.exDate));
     const latest = dividends[0];
 
-    // ── חלץ הכרזות חשובות (announcements/press-releases) ──
-    const announcements = [];
-    const announcementRegex = /<(?:h[1-4]|p|li|div)[^>]*>([\s\S]{20,300}?)<\/(?:h[1-4]|p|li|div)>/gi;
-    const keywords = /distribution|announce|dividend|special|yield|fund|nav|earnings/i;
-    let annoMatch;
-    while ((annoMatch = announcementRegex.exec(html)) !== null && announcements.length < 5) {
-      const text = cleanHTML(annoMatch[1]);
-      if (keywords.test(text) && text.length > 30 && text.length < 200) {
-        announcements.push({ title: text, source: "YieldMax ETFs", pubDate: TODAY, ticker: "MSTY" });
-      }
-    }
-
-    console.log(`  ✅ yieldmaxetfs.com: ${dividends.length} דיבידנדים | ${announcements.length} הכרזות`);
-    return { ...latest, recent: dividends, announcements };
+    // V2.9.7: הוסר scraper של "announcements" — שלף סלוגנים פרסומיים מהדף
+    // (טקסטים כמו "YieldMax Maximized for Potential Income"), לא חדשות אמיתיות
+    console.log(`  ✅ yieldmaxetfs.com: ${dividends.length} דיבידנדים`);
+    return { ...latest, recent: dividends, announcements: [] };
   } catch (e) {
     console.log(`    ⚠ yieldmaxetfs.com: ${e.message}`);
     return null;
@@ -1112,14 +1102,15 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
     // ✅ צבור (אל תמחק) — שמור איחוד של ישן + חדש, מגבל ל-100 כדי שלא יגדל לאין סוף
     const allSentKeys = [...new Set([...(prevEmailedUrls || []), ...sentKeys])].slice(-100);
 
-    // HTML body — V2.9.2: כל כותרת = קישור לכתבה המקורית
+    // V2.9.7: קישור בולט ויזואלית (כחול + קו תחתי) — קודם היה צבע טקסט רגיל ובלי קו, נראה כמו טקסט
+    // "לחץ לכתבה המלאה" מוצג רק כשיש URL בפועל
     const newsHtml = newNews.map(n =>
       `<li style="margin-bottom:8px">
         <b style="color:#64b5f6">[${n.sourceHe || n.ticker}]</b>
         ${n.url
-          ? `<a href="${n.url}" style="color:#e2e8f0;text-decoration:none" target="_blank">${n.summaryHe || n.title}</a>`
-          : (n.summaryHe || n.title)}
-        <span style="color:#475569;font-size:11px;display:block;margin-top:2px">לחץ לכתבה המלאה ↗</span>
+          ? `<a href="${n.url}" style="color:#60a5fa;text-decoration:underline" target="_blank" rel="noopener">${n.summaryHe || n.title}</a>
+             <span style="color:#475569;font-size:11px;display:block;margin-top:2px">לחץ לכתבה המלאה ↗</span>`
+          : `<span style="color:#e2e8f0">${n.summaryHe || n.title}</span>`}
       </li>`
     ).join("");
 
