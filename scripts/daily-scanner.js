@@ -208,7 +208,8 @@ async function yahooPrice(ticker, fallbackTicker = null) {
 // ── YieldMax ETFs — dividend scraper (V2.7.0: מקור ראשי) ──────
 /** שולף דיבידנדים + הכרזות מ-yieldmaxetfs.com/our-etfs/msty/ */
 async function yieldmaxDividend() {
-  const url = "https://www.yieldmaxetfs.com/our-etfs/msty/";
+  // ⚠️ ללא www — www.yieldmaxetfs.com מחזיר redirect 301 ו-httpsRequest לא עוקב אחריו
+  const url = "https://yieldmaxetfs.com/our-etfs/msty/";
   try {
     const { status, body: html } = await httpsRequest(url, {
       timeout: 15000,
@@ -227,6 +228,8 @@ async function yieldmaxDividend() {
     const dateRegex = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/;
     const amountRegex = /\$?([\d]+\.[\d]{2,4})/;
 
+    // מבנה הטבלה (מאומת 14/05/2026):
+    // cols[0]=DISTRIBUTION PER SHARE | cols[1]=DECLARED | cols[2]=EX DATE | cols[3]=RECORD | cols[4]=PAYABLE | cols[5]=ROC
     const dividends = [];
     let rowMatch;
     while ((rowMatch = rowRegex.exec(html)) !== null) {
@@ -237,25 +240,20 @@ async function yieldmaxDividend() {
       while ((cellMatch = cellRe.exec(rowText)) !== null) {
         cells.push(cleanHTML(cellMatch[1]));
       }
-      if (cells.length >= 3) {
-        // נסה למצוא ex-date + amount
-        const exDateStr = cells.find(c => dateRegex.test(c) && !c.includes("$"));
-        const amountStr = cells.find(c => amountRegex.test(c));
-        if (exDateStr && amountStr) {
-          const dm = dateRegex.exec(exDateStr);
-          const am = amountRegex.exec(amountStr);
-          if (dm && am) {
-            const exDate = `${dm[3]}-${String(dm[1]).padStart(2,"0")}-${String(dm[2]).padStart(2,"0")}`;
-            const amount = parseFloat(am[1]);
-            if (amount > 0 && amount < 5) { // sanity check: MSTY divs are $0.1–$4
-              const payDateStr = cells.find(c => dateRegex.test(c) && c !== exDateStr);
-              let payDate = exDate; // fallback
-              if (payDateStr) {
-                const pm = dateRegex.exec(payDateStr);
-                if (pm) payDate = `${pm[3]}-${String(pm[1]).padStart(2,"0")}-${String(pm[2]).padStart(2,"0")}`;
-              }
-              dividends.push({ amount, exDate, payDate, status: "confirmed", source: "YieldMax ETFs" });
-            }
+      // שורת נתונים: לפחות 5 עמודות, העמודה הראשונה מכילה סכום ($0.xxxx)
+      if (cells.length >= 5 && amountRegex.test(cells[0])) {
+        const am = amountRegex.exec(cells[0]);
+        const amount = parseFloat(am[1]);
+        if (amount > 0 && amount < 5) {
+          // cols[2] = EX DATE (לא declared date!)
+          const exDateStr  = cells[2]; // EX DATE
+          const payDateStr = cells[4]; // PAYABLE DATE
+          const dm  = dateRegex.exec(exDateStr);
+          const pm  = dateRegex.exec(payDateStr);
+          if (dm) {
+            const exDate  = `${dm[3]}-${String(dm[1]).padStart(2,"0")}-${String(dm[2]).padStart(2,"0")}`;
+            const payDate = pm ? `${pm[3]}-${String(pm[1]).padStart(2,"0")}-${String(pm[2]).padStart(2,"0")}` : exDate;
+            dividends.push({ amount, exDate, payDate, status: "confirmed", source: "YieldMax ETFs" });
           }
         }
       }
