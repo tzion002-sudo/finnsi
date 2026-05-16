@@ -1102,15 +1102,18 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
     // ✅ צבור (אל תמחק) — שמור איחוד של ישן + חדש, מגבל ל-100 כדי שלא יגדל לאין סוף
     const allSentKeys = [...new Set([...(prevEmailedUrls || []), ...sentKeys])].slice(-100);
 
-    // V2.9.7: קישור בולט ויזואלית (כחול + קו תחתי) — קודם היה צבע טקסט רגיל ובלי קו, נראה כמו טקסט
-    // "לחץ לכתבה המלאה" מוצג רק כשיש URL בפועל
+    // V2.9.8: כפתור CTA ברור "קרא בכתבה →" בנפרד מהכותרת
+    // Gmail Mobile לפעמים לא מציג text-decoration:underline ב-inline styles —
+    // לכן: <u> מפורש + כפתור עם רקע מודגש שמחליף את כל ה-rendering ambiguity
     const newsHtml = newNews.map(n =>
-      `<li style="margin-bottom:8px">
-        <b style="color:#64b5f6">[${n.sourceHe || n.ticker}]</b>
+      `<li style="margin-bottom:14px;list-style:none">
+        <div style="margin-bottom:4px">
+          <b style="color:#64b5f6">[${n.sourceHe || n.ticker}]</b>
+          <span style="color:#e2e8f0">${n.summaryHe || n.title}</span>
+        </div>
         ${n.url
-          ? `<a href="${n.url}" style="color:#60a5fa;text-decoration:underline" target="_blank" rel="noopener">${n.summaryHe || n.title}</a>
-             <span style="color:#475569;font-size:11px;display:block;margin-top:2px">לחץ לכתבה המלאה ↗</span>`
-          : `<span style="color:#e2e8f0">${n.summaryHe || n.title}</span>`}
+          ? `<a href="${n.url}" target="_blank" rel="noopener" style="display:inline-block;background:#1d4ed8;color:#ffffff !important;padding:6px 14px;border-radius:6px;text-decoration:none;font-size:12px;font-weight:bold">📖 קרא כתבה מלאה ←</a>`
+          : ``}
       </li>`
     ).join("");
 
