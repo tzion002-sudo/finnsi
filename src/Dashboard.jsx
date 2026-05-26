@@ -37,7 +37,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.6";
+const APP_VERSION = "V2.9.4";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -5037,7 +5037,7 @@ export default function HaMatzpanGemelnet() {
           <CheckCircle2 size={14} className="text-emerald-400 flex-shrink-0 mt-0.5"/>
           <div className="flex-1">
             <strong className="text-slate-200">המצפן {APP_VERSION}:</strong> <strong className="text-emerald-300">Phone↔Computer Sync · Manual 💾 Save · Autonomous Morning Scan</strong> · Loans/Savings/Dividends now cloud-synced · Excellence Split · Firestore priority ·
-            Golden Sources · ManualLock · מחסן דוחות PDF · <strong className="text-amber-300">סוכן MSTY</strong> · היסטוריה יומית · market_history.
+            Golden Sources · ManualLock · פענוח דוחות קופות אוטומטי · מחסן דוחות PDF · <strong className="text-amber-300">סוכן MSTY</strong> · היסטוריה יומית · market_history.
             כל עריכה ידנית נשמרת מיידית ב-Firestore (finnsi-3a75d) · סריקה אוטונומית מתוזמנת ב-09:00 · {new Date().getFullYear()}.
           </div>
         </div>
