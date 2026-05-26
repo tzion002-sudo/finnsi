@@ -1196,6 +1196,7 @@ const SavingsTab = ({ savings, setSavings }) => {
   // V2.9.4 — Fund history for charts
   const [fundHistory, setFundHistory] = useState([]);
   const [historyOwner, setHistoryOwner] = useState('כולם');
+  const [selectedFundKey, setSelectedFundKey] = useState(null); // "owner|fundType|institution"
 
   useEffect(() => {
     const filters = historyOwner !== 'כולם' ? { owner: historyOwner } : {};
@@ -1247,7 +1248,13 @@ const SavingsTab = ({ savings, setSavings }) => {
       byDate[q] = (byDate[q] || 0) + snap.balance;
     });
     return Object.entries(byDate)
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => {
+        const [qa, ya] = a.split(' '); // e.g. "Q3", "2025"
+        const [qb, yb] = b.split(' ');
+        const yearDiff = parseInt(ya) - parseInt(yb);
+        if (yearDiff !== 0) return yearDiff;
+        return parseInt(qa.slice(1)) - parseInt(qb.slice(1)); // Q1→1, Q2→2, etc.
+      })
       .map(([quarter, total]) => ({ quarter, total }));
   }, [fundHistory]);
 
@@ -1256,6 +1263,27 @@ const SavingsTab = ({ savings, setSavings }) => {
     const owners = [...new Set(fundHistory.map(s => s.owner).filter(Boolean))];
     return ['כולם', ...owners];
   }, [fundHistory]);
+
+  // V2.9.4 — Detail chart לקופה נבחרת
+  const detailChartData = useMemo(() => {
+    if (!selectedFundKey) return [];
+    const [owner, fundType, institution] = selectedFundKey.split('|');
+    return fundHistory
+      .filter(s => s.owner === owner && s.fundType === fundType && s.institution === institution)
+      .sort((a, b) => (a.reportDate ?? '').localeCompare(b.reportDate ?? ''))
+      .map(s => {
+        const d = new Date(s.reportDate);
+        return {
+          quarter: `Q${Math.ceil((d.getMonth() + 1) / 3)} ${d.getFullYear()}`,
+          balance: s.balance,
+          ytd:     s.ytdReturn,
+        };
+      });
+  }, [fundHistory, selectedFundKey]);
+
+  const selectedFundLatest = useMemo(() =>
+    detailChartData.length ? detailChartData[detailChartData.length - 1] : null,
+  [detailChartData]);
 
   return (
     <div>
@@ -1303,6 +1331,42 @@ const SavingsTab = ({ savings, setSavings }) => {
               <Line type="monotone" dataKey="total" stroke="#14b8a6" strokeWidth={2} dot={{ fill: '#14b8a6', r: 4 }}/>
             </LineChart>
           </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* V2.9.4 — כרטיס קופה מורחב */}
+      {selectedFundKey && detailChartData.length > 0 && (
+        <div className="bg-slate-800/60 border border-teal-700/50 rounded-2xl p-5 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-teal-300">
+              📊 {selectedFundKey.split('|')[2]} · {
+                ({ pension: 'פנסיה', study_fund: 'השתלמות', gemel: 'גמל', children: 'חיסכון ילד' })[selectedFundKey.split('|')[1]]
+              } · {selectedFundKey.split('|')[0]}
+            </h3>
+            <button onClick={() => setSelectedFundKey(null)}
+              className="text-slate-500 hover:text-slate-300 text-lg leading-none">×</button>
+          </div>
+
+          <ResponsiveContainer width="100%" height={160}>
+            <LineChart data={detailChartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155"/>
+              <XAxis dataKey="quarter" tick={{ fill: '#94a3b8', fontSize: 10 }}/>
+              <YAxis tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} tick={{ fill: '#94a3b8', fontSize: 10 }} width={55}/>
+              <Tooltip formatter={(v, n) => [n === 'balance' ? fmt(v) : `${v}%`, n === 'balance' ? 'יתרה' : 'תשואה YTD']}
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}/>
+              <Line type="monotone" dataKey="balance" stroke="#14b8a6" strokeWidth={2} dot={{ fill: '#14b8a6', r: 4 }} name="balance"/>
+            </LineChart>
+          </ResponsiveContainer>
+
+          {selectedFundLatest?.ytd != null && (
+            <div className="mt-3 flex items-center gap-2 text-sm">
+              <span className="text-slate-400">תשואה YTD:</span>
+              <span className={selectedFundLatest.ytd < 0 ? "text-red-400 font-bold" : "text-green-400 font-bold"}>
+                {selectedFundLatest.ytd > 0 ? '+' : ''}{selectedFundLatest.ytd}%
+              </span>
+              <span className="text-slate-500 text-xs">({detailChartData.length} דוחות בהיסטוריה)</span>
+            </div>
+          )}
         </div>
       )}
 
