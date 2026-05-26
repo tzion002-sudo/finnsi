@@ -2924,61 +2924,66 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
       ? `${assetToUpdate.owner} · ${assetToUpdate.type}`
       : "לא ידוע";
 
-    // ── שמירת נקודת היסטוריה ──────────────────────────────────
-    const snapshotId = await saveFundSnapshot({
-      owner:           scanResult.owner,
-      fundType:        scanResult.reportType,
-      institution:     scanResult.institution,
-      reportDate:      scanResult.reportDate,
-      balance:         scanResult.balance,
-      ytdReturn:       scanResult.annualReturn,
-      deposited:       null,
-      fees:            null,
-      investmentTrack: scanResult.investmentTrack,
-      feeFromBalance:  scanResult.feeFromBalance,
-      feeFromDeposit:  scanResult.feeFromDeposit,
-      assetId,
-      fileName:        scanResult.fileName,
-    });
+    try {
+      // ── שמירת נקודת היסטוריה ──────────────────────────────────
+      const snapshotId = await saveFundSnapshot({
+        owner:           scanResult.owner,
+        fundType:        scanResult.reportType,
+        institution:     scanResult.institution,
+        reportDate:      scanResult.reportDate,
+        balance:         scanResult.balance,
+        ytdReturn:       scanResult.annualReturn,
+        deposited:       null,
+        fees:            null,
+        investmentTrack: scanResult.investmentTrack,
+        feeFromBalance:  scanResult.feeFromBalance,
+        feeFromDeposit:  scanResult.feeFromDeposit,
+        assetId,
+        fileName:        scanResult.fileName,
+      });
 
-    // ── עדכון יתרה נוכחית ─────────────────────────────────────
-    if (assetId && scanResult.balance != null) {
-      setAssets(prev => prev.map(a => a.id !== assetId ? a : {
-        ...a,
-        reportBalance:    scanResult.balance,
-        reportDate:       scanResult.reportDate,
-        checkDate:        scanResult.reportDate,
-        source:           "pdf_report",
-        _reportConfirmed: true,
-      }));
-      if (assetToUpdate) {
-        await saveAsset({ ...assetToUpdate, reportBalance: scanResult.balance,
-          reportDate: scanResult.reportDate, source: "pdf_report" });
+      // ── עדכון יתרה נוכחית ─────────────────────────────────────
+      if (assetId && scanResult.balance != null) {
+        setAssets(prev => prev.map(a => a.id !== assetId ? a : {
+          ...a,
+          reportBalance:    scanResult.balance,
+          reportDate:       scanResult.reportDate,
+          checkDate:        scanResult.reportDate,
+          source:           "pdf_report",
+          _reportConfirmed: true,
+        }));
+        if (assetToUpdate) {
+          await saveAsset({ ...assetToUpdate, reportBalance: scanResult.balance,
+            reportDate: scanResult.reportDate, source: "pdf_report" });
+        }
+        setSaveToast(`📄 ${assetName}: יתרה ${fmt(scanResult.balance)} עודכנה ✅`);
+      } else {
+        setSaveToast(`📄 דוח נשמר בהיסטוריה — לא זוהתה קופה תואמת`);
       }
-      setSaveToast(`📄 ${assetName}: יתרה ${fmt(scanResult.balance)} עודכנה ✅`);
-    } else {
-      setSaveToast(`📄 דוח נשמר בהיסטוריה — לא זוהתה קופה תואמת`);
-    }
 
-    // ── שמירת רשומת ארכיון ────────────────────────────────────
-    const archiveEntry = {
-      id:           `doc_${Date.now()}`,
-      fileName:     scanResult.fileName,
-      uploadedAt:   new Date().toISOString(),
-      reportDate:   scanResult.reportDate,
-      balance:      scanResult.balance,
-      institution:  scanResult.institution,
-      owner:        scanResult.owner,
-      fundType:     scanResult.reportType,
-      matchedAssetId:   assetId,
-      matchedAssetName: assetName,
-      confidence:   scanResult.confidence,
-      snapshotId,
-      status:       "confirmed",
-      source:       "pdf_report",
-    };
-    setDocuments(prev => [archiveEntry, ...prev]);
-    setScanResult(null);
+      // ── שמירת רשומת ארכיון ────────────────────────────────────
+      const archiveEntry = {
+        id:           `doc_${Date.now()}`,
+        fileName:     scanResult.fileName,
+        uploadedAt:   new Date().toISOString(),
+        reportDate:   scanResult.reportDate,
+        balance:      scanResult.balance,
+        institution:  scanResult.institution,
+        owner:        scanResult.owner,
+        fundType:     scanResult.reportType,
+        matchedAssetId:   assetId,
+        matchedAssetName: assetName,
+        confidence:   scanResult.confidence,
+        snapshotId,
+        status:       "confirmed",
+        source:       "pdf_report",
+      };
+      setDocuments(prev => [archiveEntry, ...prev]);
+      setScanResult(null);
+    } catch (err) {
+      console.error('applyDocScan error:', err);
+      setSaveToast(`❌ שגיאה בשמירת הדוח: ${err.message}`);
+    }
   };
 
   const deleteDoc = (id) => setDocuments(prev => prev.filter(d => d.id !== id));
@@ -3030,8 +3035,8 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
           {/* כפול */}
           {scanResult._isDuplicate && (
             <div className="text-amber-400 text-sm">⚠️ דוח זה כבר הועלה. לדרוס?
-              <button onClick={() => applyDocScan(scanResult._matches?.[0]?.id ?? null)}
-                className="ml-3 bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-1 rounded-lg">דרוס ושמור</button>
+              <button onClick={() => applyDocScan(null)}
+                className="ml-3 bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-1 rounded-lg">שמור בכל זאת</button>
               <button onClick={() => setScanResult(null)}
                 className="ml-2 bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1 rounded-lg">בטל</button>
             </div>
