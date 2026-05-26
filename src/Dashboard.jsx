@@ -1285,6 +1285,23 @@ const SavingsTab = ({ savings, setSavings }) => {
     detailChartData.length ? detailChartData[detailChartData.length - 1] : null,
   [detailChartData]);
 
+  // V2.9.4 — רשימת קופות ייחודיות מהיסטוריה לבחירה
+  const availableFunds = useMemo(() => {
+    const seen = new Set();
+    return fundHistory
+      .filter(s => s.owner && s.fundType && s.institution)
+      .filter(s => {
+        const key = `${s.owner}|${s.fundType}|${s.institution}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map(s => ({
+        key: `${s.owner}|${s.fundType}|${s.institution}`,
+        label: `${s.owner} · ${{ pension: 'פנסיה', study_fund: 'השתלמות', gemel: 'גמל', children: 'חיסכון ילד' }[s.fundType] ?? s.fundType} · ${s.institution}`,
+      }));
+  }, [fundHistory]);
+
   return (
     <div>
       {/* כותרת */}
@@ -1331,6 +1348,24 @@ const SavingsTab = ({ savings, setSavings }) => {
               <Line type="monotone" dataKey="total" stroke="#14b8a6" strokeWidth={2} dot={{ fill: '#14b8a6', r: 4 }}/>
             </LineChart>
           </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* V2.9.4 — בחירת קופה לגרף פירוט */}
+      {availableFunds.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs text-slate-500 mb-2">לחץ על קופה לצפייה בגרף פירוט:</p>
+          <div className="flex flex-wrap gap-2">
+            {availableFunds.map(f => (
+              <button key={f.key}
+                onClick={() => setSelectedFundKey(prev => prev === f.key ? null : f.key)}
+                className={`text-xs px-3 py-1.5 rounded-xl border transition-colors ${
+                  selectedFundKey === f.key
+                    ? 'bg-teal-700 border-teal-500 text-white'
+                    : 'bg-slate-800 border-slate-600 text-slate-300 hover:border-teal-600'
+                }`}>{f.label}</button>
+            ))}
+          </div>
         </div>
       )}
 
