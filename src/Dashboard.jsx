@@ -1193,6 +1193,16 @@ function ymToHebrew(ym) {
 const SavingsTab = ({ savings, setSavings }) => {
   const [newRow, setNewRow] = useState({ ym: new Date().toISOString().slice(0,7), amount: "", notes: "" });
 
+  // V2.9.4 — Fund history for charts
+  const [fundHistory, setFundHistory] = useState([]);
+  const [historyOwner, setHistoryOwner] = useState('כולם');
+
+  useEffect(() => {
+    const filters = historyOwner !== 'כולם' ? { owner: historyOwner } : {};
+    const unsub = subscribeFundHistory(filters, setFundHistory);
+    return unsub;
+  }, [historyOwner]);
+
   const addSaving = () => {
     if (!newRow.ym || !newRow.amount) return;
     const id = "sv" + Date.now();
@@ -1227,6 +1237,26 @@ const SavingsTab = ({ savings, setSavings }) => {
     });
   }, [sorted]);
 
+  // V2.9.4 — Summary chart: סה"כ יתרה לפי רבעון (לבעל נבחר)
+  const summaryChartData = useMemo(() => {
+    const byDate = {};
+    fundHistory.forEach(snap => {
+      if (!snap.reportDate || snap.balance == null) return;
+      const d = new Date(snap.reportDate);
+      const q = `Q${Math.ceil((d.getMonth() + 1) / 3)} ${d.getFullYear()}`;
+      byDate[q] = (byDate[q] || 0) + snap.balance;
+    });
+    return Object.entries(byDate)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([quarter, total]) => ({ quarter, total }));
+  }, [fundHistory]);
+
+  // רשימת בעלים ייחודיים מהיסטוריה
+  const historyOwners = useMemo(() => {
+    const owners = [...new Set(fundHistory.map(s => s.owner).filter(Boolean))];
+    return ['כולם', ...owners];
+  }, [fundHistory]);
+
   return (
     <div>
       {/* כותרת */}
@@ -1245,6 +1275,36 @@ const SavingsTab = ({ savings, setSavings }) => {
           </p>
         </div>
       </div>
+
+      {/* V2.9.4 — גרף מסכם קופות רבעוני */}
+      {summaryChartData.length > 0 && (
+        <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 mb-5">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+              <TrendingUp size={14} className="text-teal-400"/> התקדמות קופות לאורך זמן
+            </h3>
+            <div className="flex gap-1">
+              {historyOwners.map(o => (
+                <button key={o} onClick={() => setHistoryOwner(o)}
+                  className={`text-xs px-3 py-1 rounded-full transition-colors ${
+                    historyOwner === o
+                      ? 'bg-teal-600 text-white'
+                      : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                  }`}>{o}</button>
+              ))}
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={summaryChartData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155"/>
+              <XAxis dataKey="quarter" tick={{ fill: '#94a3b8', fontSize: 11 }}/>
+              <YAxis tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} tick={{ fill: '#94a3b8', fontSize: 11 }} width={60}/>
+              <Tooltip formatter={(v) => [fmt(v), 'יתרה כוללת']} contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}/>
+              <Line type="monotone" dataKey="total" stroke="#14b8a6" strokeWidth={2} dot={{ fill: '#14b8a6', r: 4 }}/>
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* כרטיסי סיכום — צבעי ירוק/כחול */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
