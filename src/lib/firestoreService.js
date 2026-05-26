@@ -487,6 +487,7 @@ export async function saveFundSnapshot(snapshot) {
     console.warn('saveFundSnapshot: Firebase not ready, skipping');
     return null;
   }
+  if (!snapshot) return null;
   const ref = await addDoc(fundHistoryCol(), {
     owner:           snapshot.owner           ?? null,
     fundType:        snapshot.fundType         ?? null,
@@ -501,7 +502,7 @@ export async function saveFundSnapshot(snapshot) {
     feeFromDeposit:  snapshot.feeFromDeposit   ?? null,
     assetId:         snapshot.assetId          ?? null,
     fileName:        snapshot.fileName         ?? null,
-    uploadedAt:      new Date().toISOString(),
+    uploadedAt:      serverTimestamp(),
   });
   return ref.id;
 }
@@ -528,7 +529,7 @@ export async function findExistingSnapshot(owner, fundType, institution, reportD
  * filters: { owner?, fundType?, institution? } — כל שדה אופציונלי.
  * מחזיר unsubscribe function.
  */
-export function subscribeFundHistory(filters, onData) {
+export function subscribeFundHistory(filters, onData, onError) {
   if (!isFirebaseReady()) { onData([]); return () => {}; }
   const constraints = [];
   if (filters.owner)       constraints.push(where('owner',       '==', filters.owner));
@@ -536,7 +537,8 @@ export function subscribeFundHistory(filters, onData) {
   if (filters.institution) constraints.push(where('institution', '==', filters.institution));
   constraints.push(orderBy('reportDate', 'asc'));
   const q = query(fundHistoryCol(), ...constraints);
-  return onSnapshot(q, snap =>
-    onData(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+  return onSnapshot(q,
+    snap => onData(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+    err => { if (onError) onError(err); else console.error('subscribeFundHistory error:', err); }
   );
 }
