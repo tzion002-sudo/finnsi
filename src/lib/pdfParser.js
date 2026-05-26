@@ -1,16 +1,19 @@
 /**
- * pdfParser.js – The Compass PDF Analysis Engine v2
+ * pdfParser.js – The Compass PDF Analysis Engine v3
  * ---------------------------------------------------
- * בנוי ומדויק על בסיס ניתוח 8 דוחות אמיתיים לשנת 2025:
- *   • מנורה מבטחים – קרן פנסיה (ציון וזיו)
- *   • מיטב דש – קרן השתלמות + קופת גמל (ציון)
- *   • כלל – קופת גמל + קרנות השתלמות (זיו וציון)
- *   • אלטשולר שחם – חיסכון לכל ילד (הראל וליאם)
+ * KEY INSIGHT (discovered from real PDFs):
+ *   pdfjs-dist outputs Hebrew RTL PDFs with a SPACE BETWEEN EVERY CHARACTER.
+ *   "מנורה מבטחים" → "מ נ ו ר ה מ ב ט ח י ם"
+ *   Numbers (e.g. 657,178) and Latin text appear intact.
  *
- * תובנת מפתח: pdfplumber קורא טקסט RTL לעתים קרובות "הפוך".
- * המספרים תמיד מופיעים נכון, הטקסט העברי עלול להיות מהופך.
- * הפתרון: מחפשים גם בכיוון קדמי וגם הפוך, ומשתמשים ב-window
- * של מספרים ליד מילות מפתח.
+ * SECOND INSIGHT: RTL order reversal.
+ *   In RTL rows, the number appears BEFORE the Hebrew label:
+ *   "657,178   י ת ר ת ה כ ס פ י ם ב ק ר ן ל ת א ר י ך 31/03/2026"
+ *
+ * SOLUTION: hebrewRx() helper builds a regex that matches a Hebrew string
+ *   with \s* between characters, so it works with both spaced and non-spaced output.
+ *
+ * Supported: מנורה מבטחים, מיטב דש, כלל, אלטשולר שחם, הראל, מגדל, פסגות, הפניקס, ילין לפידות
  */
 
 import * as pdfjsLib from 'pdfjs-dist';
@@ -19,67 +22,46 @@ import pdfjsWorkerUrl from 'pdfjs-dist/build/pdf.worker?url';
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 
 // ══════════════════════════════════════════════════════════════
+//  CORE HELPER — match Hebrew regardless of char-spacing
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * hebrewRx("מנורה מבטחים") → regex matching:
+ *   "מנורה מבטחים"         (normal)
+ *   "מ נ ו ר ה מ ב ט ח י ם" (pdfjs spaced output)
+ *   "מנורהמבטחים"          (no space)
+ */
+function hebrewRx(str) {
+  const chars = [...str].filter(c => !/\s/.test(c)); // strip whitespace
+  return new RegExp(
+    chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*')
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
 //  INSTITUTION DETECTION
-//  כולל זיהוי גם בכתיבה הפוכה (כפי שpdfplumber מוציא)
 // ══════════════════════════════════════════════════════════════
 
 const INSTITUTIONS = [
-  {
-    key: 'מנורה',
-    forward:  ['מנורה מבטחים', 'מנורה פנסיה', 'Menora', 'menoramivt'],
-    reversed: ['היסנפ םיחטבמ הרונמ', 'היסנפ הרונמ'],
-  },
-  {
-    key: 'מיטב דש',
-    forward:  ['מיטב דש', 'מיטב גמל', 'מיטב השתלמות', 'Meitav'],
-    reversed: ['תומלתשה בטימ', 'למג בטימ', 'היסנפו למג בטימ'],
-  },
-  {
-    key: 'כלל',
-    forward:  ['כלל תמר', 'כלל השתלמות', 'כלל גמל', 'Clal'],
-    reversed: ['תומלתשה ללכ', 'רמת ללכ', 'למג ללכ'],
-  },
-  {
-    key: 'אלטשולר שחם',
-    forward:  ['אלטשולר שחם', 'אלטשולר', 'as-invest'],
-    reversed: ['רלושטלא', 'םחש רלושטלא'],
-  },
-  {
-    key: 'הראל',
-    forward:  ['הראל ביטוח', 'הראל גמל', 'הראל פנסיה', 'Harel'],
-    reversed: ['למג לארה', 'ןוחיטב לארה'],
-  },
-  {
-    key: 'מגדל',
-    forward:  ['מגדל ביטוח', 'מגדל גמל', 'Migdal'],
-    reversed: ['למג לדגמ'],
-  },
-  {
-    key: 'פסגות',
-    forward:  ['פסגות גמל', 'פסגות פנסיה', 'Psagot'],
-    reversed: ['למג תוגספ'],
-  },
-  {
-    key: 'אקסלנס',
-    forward:  ['אקסלנס', 'Excellence', 'נשוא אקסלנס'],
-    reversed: ['סנלסקא'],
-  },
-  {
-    key: 'ילין לפידות',
-    forward:  ['ילין לפידות', 'Yelin Lapidot'],
-    reversed: ['תודיפל ןיליי'],
-  },
-  {
-    key: 'הפניקס',
-    forward:  ['הפניקס', 'Phoenix'],
-    reversed: ['סקינפה'],
-  },
+  { key: 'מנורה',        patterns: ['מנורה מבטחים', 'מנורה פנסיה', 'Menora', 'menoramivt'] },
+  { key: 'מיטב דש',      patterns: ['מיטב דש', 'מיטב גמל', 'מיטב השתלמות', 'Meitav'] },
+  { key: 'כלל',          patterns: ['כלל תמר', 'כלל השתלמות', 'כלל גמל', 'Clal'] },
+  { key: 'אלטשולר שחם',  patterns: ['אלטשולר שחם', 'אלטשולר', 'as-invest'] },
+  { key: 'הראל',         patterns: ['הראל ביטוח', 'הראל גמל', 'הראל פנסיה', 'Harel'] },
+  { key: 'מגדל',         patterns: ['מגדל ביטוח', 'מגדל גמל', 'Migdal'] },
+  { key: 'פסגות',        patterns: ['פסגות גמל', 'פסגות פנסיה', 'Psagot'] },
+  { key: 'אקסלנס',       patterns: ['אקסלנס', 'Excellence'] },
+  { key: 'ילין לפידות',  patterns: ['ילין לפידות', 'Yelin Lapidot'] },
+  { key: 'הפניקס',       patterns: ['הפניקס', 'Phoenix'] },
 ];
 
 function detectInstitution(text) {
-  for (const { key, forward, reversed } of INSTITUTIONS) {
-    const allPatterns = [...forward, ...reversed];
-    if (allPatterns.some(p => text.includes(p))) return key;
+  for (const { key, patterns } of INSTITUTIONS) {
+    for (const p of patterns) {
+      // Latin / URL patterns: plain includes; Hebrew: flexible regex
+      const isHebrew = /[א-ת]/.test(p);
+      if (isHebrew ? hebrewRx(p).test(text) : text.includes(p)) return key;
+    }
   }
   return null;
 }
@@ -88,21 +70,12 @@ function detectInstitution(text) {
 //  REPORT TYPE DETECTION
 // ══════════════════════════════════════════════════════════════
 
-const REPORT_TYPE_PATTERNS = {
-  pension:    ['קרן פנסיה', 'פנסיה מבטחים', 'היסנפ', 'ןרקב תימעל'],
-  study_fund: ['קרן השתלמות', 'תומלתשה ןרק', 'השתלמות'],
-  gemel:      ['קופת גמל', 'למג תפוק', 'גמל להשקעה', 'ןוכסיחל למג'],
-  children:   ['חיסכון לכל ילד', 'דליל ןוכסיח', 'children'],
-};
-
 function detectReportType(text) {
-  // Children's savings detection first (most specific)
-  if (text.includes('דליל ןוכסיח') || text.includes('חיסכון לכל ילד') || text.includes('as-invest')) {
-    return 'children';
-  }
-  for (const [type, patterns] of Object.entries(REPORT_TYPE_PATTERNS)) {
-    if (patterns.some(p => text.includes(p))) return type;
-  }
+  // as-invest = אלטשולר ילדים
+  if (text.includes('as-invest') || hebrewRx('חיסכון לכל ילד').test(text)) return 'children';
+  if (hebrewRx('קרן פנסיה').test(text) || hebrewRx('פנסיה מבטחים').test(text)) return 'pension';
+  if (hebrewRx('קרן השתלמות').test(text) || hebrewRx('השתלמות').test(text)) return 'study_fund';
+  if (hebrewRx('קופת גמל').test(text) || hebrewRx('גמל להשקעה').test(text)) return 'gemel';
   return 'unknown';
 }
 
@@ -110,224 +83,159 @@ function detectReportType(text) {
 //  NUMBER EXTRACTION
 // ══════════════════════════════════════════════════════════════
 
-/** ממיר מחרוזת מספר ישראלית לfloat */
 function parseILNumber(str) {
   const clean = str.replace(/,/g, '').replace(/₪/g, '').trim();
   const val = parseFloat(clean);
   return isNaN(val) ? null : val;
 }
 
-/** מחלץ את כל המספרים בפורמט ישראלי מהטקסט */
 function extractAllNumbers(text, minVal = 0, maxVal = 100_000_000) {
-  const matches = [...text.matchAll(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)/g)];
-  return matches
+  return [...text.matchAll(/([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)/g)]
     .map(m => parseILNumber(m[1]))
     .filter(v => v !== null && v >= minVal && v <= maxVal);
 }
 
 // ══════════════════════════════════════════════════════════════
-//  BALANCE EXTRACTION — מותאם לכל סוג דוח
+//  BALANCE EXTRACTION
 // ══════════════════════════════════════════════════════════════
 
-/**
- * Strategies בסדר עדיפות:
- * 1. Pattern ספציפי לחברה/סוג
- * 2. Patterns כלליים
- * 3. Fallback: המספר הגדול ביותר בטווח הגיוני
- */
 function extractBalance(text, reportType, institution) {
 
   // ── A. קרן פנסיה מנורה ──
+  // RTL layout: number appears BEFORE the Hebrew label
+  // "657,178   י ת ר ת ה כ ס פ י ם ב ק ר ן ל ת א ר י ך 31/03/2026"
   if (reportType === 'pension' && institution?.includes('מנורה')) {
-    // 2026 format (forward Hebrew): "יתרת הכספים בקרן לתאריך 31/03/2026 657,178"
-    // This is the END-of-period balance (correct value)
-    const endBalancePattern = /יתרת הכספים בקרן לתאריך[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)/;
-    const mEnd = text.match(endBalancePattern);
+    // End-of-period balance (correct value)
+    const endRx = new RegExp(
+      '([0-9]{1,3}(?:,[0-9]{3})*)\\s+' + hebrewRx('יתרת הכספים בקרן לתאריך').source
+    );
+    const mEnd = text.match(endRx);
     if (mEnd) return parseILNumber(mEnd[1]);
 
-    // Older reversed format: "669,720.72 194,250.50 246,001.54 229,468.68 -ל רבטצמה ןוכסיחה תרתי"
-    const pensionPattern = /([0-9]{3,3},[0-9]{3}\.[0-9]{2})\s+[0-9,.]+ [0-9,.]+ [0-9,.]+\s+-ל\s+רבטצמה ןוכסיחה תרתי/;
-    const m = text.match(pensionPattern);
-    if (m) return parseILNumber(m[1]);
+    // Fallback: avoid start-of-year balance
+    const startRx = new RegExp(
+      '([0-9]{1,3}(?:,[0-9]{3})*)\\s+' + hebrewRx('יתרת הכספים בקרן בתחילת').source
+    );
+    const mStart = text.match(startRx);
 
-    // Fallback: look for the line with "רבטצמה ןוכסיחה תרתי" and take the first big number
+    // Look for any balance line that is NOT the start balance
     const lines = text.split('\n');
     for (const line of lines) {
-      if (line.includes('רבטצמה ןוכסיחה תרתי') && !line.includes('לוהינ')) {
+      if (hebrewRx('יתרת הכספים בקרן').test(line)) {
         const nums = extractAllNumbers(line, 100_000, 5_000_000);
-        if (nums.length > 0) return Math.max(...nums);
+        if (nums.length > 0) {
+          // Skip if this is the start-of-year figure
+          const startVal = mStart ? parseILNumber(mStart[1]) : null;
+          const candidate = nums[0];
+          if (!startVal || Math.abs(candidate - startVal) > 1000) return candidate;
+        }
       }
     }
   }
 
-  // ── B. קרן השתלמות מיטב ──
-  // Pattern: "241,394.39 :הכישמל םוכס ליזנ" OR "241,394.39 :הכישמל םוכס"
+  // ── B. קרן השתלמות ──
+  // "241,394.39   :הכישמל םוכס ליזנ" (reversed) or forward with hebrewRx
   if (reportType === 'study_fund') {
-    const studyPatterns = [
-      /([0-9]{2,3},[0-9]{3}\.[0-9]{2})\s*:הכישמל םוכס/,
+    const patterns = [
       /([0-9]{2,3},[0-9]{3}\.[0-9]{2})\s*:הכישמל\s+םוכס/,
-      // Forward
-      /יתרה.*?הנוכסיח.*?([0-9]{2,3},[0-9]{3}(?:\.[0-9]{2})?)/,
+      new RegExp('([0-9]{2,3},[0-9]{3}(?:\\.[0-9]{2})?)\\s+' + hebrewRx('יתרה לניכוי כספים').source),
     ];
-    for (const p of studyPatterns) {
+    for (const p of patterns) {
       const m = text.match(p);
       if (m) return parseILNumber(m[1]);
     }
-    // Look for the balance directly stated
-    const m2 = text.match(/([0-9]{2,3},[0-9]{3}\.[0-9]{2})\s+241,394/);
-    if (m2) return parseILNumber(m2[1]);
   }
 
-  // ── C. קופת גמל / פנסיה — שורת כ"הס ──
-  // Pattern: "59,242.96 0.00 59,242.96 כ"הס" or "40,658.46 0.00 40,658.46 כ"הס"
-  {
-    const totalPatterns = [
-      // כ"הס line — first number is total
-      /([0-9]{1,3}(?:,[0-9]{3})+\.[0-9]{2})\s+[0-9,.]+\s+[0-9,.]+\s+כ"הס/,
-      // ח"שב כ"הס
-      /([0-9]{1,3}(?:,[0-9]{3})+\.[0-9]{2})\s+[0-9,.]+\s+[0-9,.]+\s+ח"שב כ"הס/,
-    ];
-    for (const p of totalPatterns) {
-      const m = text.match(p);
-      if (m) {
-        const val = parseILNumber(m[1]);
-        if (val && val > 1000) return val;
-      }
-    }
+  // ── C. כ"הס (gemel / general total) ──
+  const totalPatterns = [
+    /([0-9]{1,3}(?:,[0-9]{3})+\.[0-9]{2})\s+[0-9,.]+\s+[0-9,.]+\s+כ"הס/,
+    /([0-9]{1,3}(?:,[0-9]{3})+\.[0-9]{2})\s+[0-9,.]+\s+[0-9,.]+\s+ח"שב כ"הס/,
+  ];
+  for (const p of totalPatterns) {
+    const m = text.match(p);
+    if (m) { const v = parseILNumber(m[1]); if (v && v > 1000) return v; }
   }
 
   // ── D. חיסכון לכל ילד (אלטשולר) ──
-  // Pattern: "14,536 הנשה ףוסב ןובשחב םיפסכה תרתי"
   if (reportType === 'children') {
-    const childPattern = /([0-9]{1,2},[0-9]{3})\s+הנשה ףוסב ןובשחב םיפסכה תרתי/;
-    const m = text.match(childPattern);
+    const childRx = new RegExp(
+      '([0-9]{1,2},[0-9]{3})\\s+' + hebrewRx('יתרת הכספים בחשבון בסוף השנה').source
+    );
+    const m = text.match(childRx);
     if (m) return parseILNumber(m[1]);
-
-    // Forward version
-    const m2 = text.match(/יתרת הכספים בחשבון בסוף השנה\s+([0-9]{1,2},[0-9]{3})/);
-    if (m2) return parseILNumber(m2[1]);
   }
 
-  // ── E. Patterns כלליים ──
-  const generalPatterns = [
-    // balance stated explicitly
-    /([0-9]{2,3},[0-9]{3}\.[0-9]{2})\s*:הכישמל\s*םוכס/,
-    /([0-9]{2,3},[0-9]{3}\.[0-9]{2})\s+241,394/,
-    /הנשה ףוסב ןובשחב םיפסכה תרתי\s+([0-9,]+)/,
-    /רבטצמה ןוכסיחה תרתי\s+([0-9]{3,3},[0-9]{3})/,
-  ];
-  for (const p of generalPatterns) {
-    const m = text.match(p);
-    if (m) {
-      const val = parseILNumber(m[1] || m[2]);
-      if (val && val >= 1000) return val;
-    }
-  }
-
-  // ── F. Fallback: largest plausible number ──
-  const allNums = extractAllNumbers(text, 5_000, 5_000_000);
-  if (allNums.length > 0) {
-    // Filter out years and phone numbers
-    const filtered = allNums.filter(n => n > 5000 && n < 5_000_000);
-    if (filtered.length > 0) return Math.round(Math.max(...filtered));
-  }
+  // ── E. Fallback (least preferred) ──
+  // AVOID picking start-of-year balances: skip if there's an explicit end-balance
+  const allNums = extractAllNumbers(text, 5_000, 5_000_000).filter(n => n > 5000);
+  if (allNums.length > 0) return Math.round(allNums[0]); // take FIRST big number, not max
 
   return null;
 }
 
 // ══════════════════════════════════════════════════════════════
-//  FEE EXTRACTION — מותאם לדוחות האמיתיים
+//  FEE EXTRACTION
 // ══════════════════════════════════════════════════════════════
 
-/**
- * מנורה פנסיה:       "0.11% ןוכסיחמ לוהינה ימד רועיש" → feeFromBalance=0.11%
- * כלל:               "0.68% ... ןוכסיחמ לוהינ ימד ללכ" → feeFromBalance=0.68%
- * אלטשולר ילדים:    "0.23% ןוכסיחמ לוהינ ימד" → feeFromBalance=0.23%
- * מיטב:             Need to search for specific pattern
- */
 function extractFees(text) {
   let feeFromDeposit = null;
   let feeFromBalance = null;
 
-  // ── Fee from savings (accumulation) ──
-  const feeBalancePatterns = [
-    // מנורה 2026 forward: "דמי ניהול מחיסכון 0.05%"
-    /דמי ניהול מחיסכון[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
-    // General forward
-    /דמי ניהול מצבירה[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
-    /ד.נ. מצבירה[^%0-9]{0,20}([0-9]+\.?[0-9]*)%/,
-    // מנורה reversed: "0.11% ןוכסיחמ לוהינה ימד רועיש"
-    /([0-9]+\.[0-9]+)%\s+ןוכסיחמ לוהינה ימד רועיש/,
-    // כלל: "0.68% 0.68% ... ןוכסיחמ לוהינ"
-    /([0-9]+\.[0-9]+)%\s+[0-9.%\s]+ןוכסיחמ לוהינ/,
-    // אלטשולר: "0.23% ןוכסיחמ לוהינ ימד"
-    /([0-9]+\.[0-9]+)%\s+ןוכסיחמ לוהינ ימד/,
-    // Numeric extraction: percentage followed by "savings fee" keywords
-    /([0-9]+\.[0-9]+)%\s+(?:ןוכסיחמ|הריבצמ)/,
-  ];
+  // RTL layout: percentage appears BEFORE the Hebrew label
+  // "1.75%   ד מ י נ י ה ו ל מ ה פ ק ד ה"
+  // "0.05%   ד מ י נ י ה ו ל מ ח י ס כ ו ן"
 
-  for (const p of feeBalancePatterns) {
-    const m = text.match(p);
-    if (m) {
-      const val = parseFloat(m[1]);
-      if (val > 0 && val < 5) { feeFromBalance = val; break; }
-    }
-  }
-
-  // ── Fee from deposit ──
-  const feeDepositPatterns = [
+  // Fee from deposit (הפקדה)
+  const depositPatterns = [
+    new RegExp('([0-9]+\\.?[0-9]*)%\\s+' + hebrewRx('דמי ניהול מהפקדה').source),
+    /דמי ניהול מהפקדה[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
     /([0-9]+\.?[0-9]*)%\s+הדקפהמ לוהינ ימד/,
     /הדקפהמ לוהינ ימד\s+([0-9]+\.?[0-9]*)%/,
-    /דמי ניהול מהפקדה[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
   ];
-
-  for (const p of feeDepositPatterns) {
+  for (const p of depositPatterns) {
     const m = text.match(p);
-    if (m) {
-      const val = parseFloat(m[1]);
-      if (val >= 0 && val < 5) { feeFromDeposit = val; break; }
-    }
+    if (m) { const v = parseFloat(m[1]); if (v >= 0 && v < 5) { feeFromDeposit = v; break; } }
   }
 
-  // Special case: "0.00% הדקפהמ לוהינ ימד" → feeFromDeposit = 0
-  if (feeFromDeposit === null && text.match(/0\.00%\s+הדקפהמ לוהינ ימד/)) {
-    feeFromDeposit = 0;
+  // Fee from savings / accumulation (חיסכון / צבירה)
+  const savingsPatterns = [
+    new RegExp('([0-9]+\\.?[0-9]*)%\\s+' + hebrewRx('דמי ניהול מחיסכון').source),
+    new RegExp('([0-9]+\\.?[0-9]*)%\\s+' + hebrewRx('דמי ניהול מצבירה').source),
+    /דמי ניהול מחיסכון[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
+    /דמי ניהול מצבירה[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
+    /ד.נ. מצבירה[^%0-9]{0,20}([0-9]+\.?[0-9]*)%/,
+    /([0-9]+\.[0-9]+)%\s+ןוכסיחמ לוהינה ימד רועיש/,
+    /([0-9]+\.[0-9]+)%\s+ןוכסיחמ לוהינ ימד/,
+    /([0-9]+\.[0-9]+)%\s+(?:ןוכסיחמ|הריבצמ)/,
+  ];
+  for (const p of savingsPatterns) {
+    const m = text.match(p);
+    if (m) { const v = parseFloat(m[1]); if (v >= 0 && v < 5) { feeFromBalance = v; break; } }
   }
 
   return { feeFromDeposit, feeFromBalance };
 }
 
 // ══════════════════════════════════════════════════════════════
-//  RETURN EXTRACTION — מותאם לדוחות האמיתיים
+//  RETURN EXTRACTION
 // ══════════════════════════════════════════════════════════════
 
-/**
- * אלטשולר ילדים: "20.54% רבגומ ןוכיס" → 20.54%
- * מנורה: תשואה נחשבת מהפרש יתרות + הפקדות
- */
 function extractReturn(text) {
+  // RTL layout: "-4.04%   מ ס ל ו ל ע ו ק ב מ ד ד   S&P 500"
   const returnPatterns = [
-    // מנורה 2026 forward: "מסלול עוקב מדד -4.04% S&P 500"
+    new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('מסלול עוקב מדד').source),
     /מסלול עוקב מדד\s+(-?[0-9]+\.[0-9]+)%/,
-    // General forward YTD return patterns
     /תשואה מתחילת שנה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
     /תשואה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
     /שיעור תשואה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
-    // אלטשולר ילדים: "20.54% רבגומ ןוכיס"
     /([0-9]+\.[0-9]+)%\s+רבגומ ןוכיס/,
-    // Generic reversed patterns
     /([0-9]+\.[0-9]+)%\s+(?:תיתנש האושת|האושת)/,
     /([+-]?[0-9]+\.[0-9]+)%\s+(?:יתנש|יתנש האושת)/,
   ];
-
   for (const p of returnPatterns) {
     const m = text.match(p);
-    if (m) {
-      const val = parseFloat(m[1]);
-      if (val > -50 && val < 200) return val;
-    }
+    if (m) { const v = parseFloat(m[1]); if (v > -50 && v < 200) return v; }
   }
-
   return null;
 }
 
@@ -336,34 +244,24 @@ function extractReturn(text) {
 // ══════════════════════════════════════════════════════════════
 
 function extractInvestmentTrack(text) {
-  const trackPatterns = [
-    // "S&P500 דדמ בקוע למג בטימ" / "s&p 500 דדמ בקוע"
-    /S&P\s*500\s+דדמ\s+בקוע/i,
-    /s&p\s+500\s+דדמ\s+בקוע/i,
-    // Forward
-    /מחקה S&P 500/i,
-    /S&P 500/i,
-    /לולסמ.*S&P/i,
-  ];
-  if (trackPatterns.some(p => text.match(p))) return 'מחקה S&P 500';
-
-  if (text.includes('רבגומ ןוכיס') || text.includes('ריבגמ ןוכיס')) return 'רבגומ ןוכיס';
-  if (text.includes('יללכ')) return 'כללי';
-  if (text.includes('הלכה')) return 'הלכה';
-
+  if (/S&P\s*500/i.test(text) || hebrewRx('מחקה S&P').test(text)) return 'מחקה S&P 500';
+  if (hebrewRx('מסלול עוקב מדד').test(text)) return 'מחקה S&P 500';
+  if (text.includes('רבגומ ןוכיס') || text.includes('ריבגמ ןוכיס')) return 'ריסק גבוה';
+  if (text.includes('יללכ') || hebrewRx('כללי').test(text)) return 'כללי';
+  if (text.includes('הלכה') || hebrewRx('הלכה').test(text)) return 'הלכה';
   return null;
 }
 
 // ══════════════════════════════════════════════════════════════
-//  OWNER DETECTION (for children's savings)
+//  OWNER DETECTION
 // ══════════════════════════════════════════════════════════════
 
 function detectOwner(text) {
-  // "22661016/0 :.ז.ת רפסמ יול לארה :תימעה םש" → הראל
-  if (text.includes('יול לארה') || text.includes('הראל יול')) return 'הראל';
-  if (text.includes('יול םאיל') || text.includes('ליאם יול')) return 'ליאם';
-  if (text.includes('יול ויז') || text.includes('זיו יול'))  return 'זיו';
-  if (text.includes('יול ןויצ') || text.includes('ציון לוי')) return 'ציון';
+  // Hebrew names appear spaced-out: "צ י ו ן ל ו י"
+  if (hebrewRx('הראל לוי').test(text) || hebrewRx('לוי הראל').test(text)) return 'הראל';
+  if (hebrewRx('ליאם לוי').test(text) || hebrewRx('לוי ליאם').test(text)) return 'ליאם';
+  if (hebrewRx('זיו לוי').test(text)  || hebrewRx('לוי זיו').test(text))  return 'זיו';
+  if (hebrewRx('ציון לוי').test(text) || hebrewRx('לוי ציון').test(text)) return 'ציון';
   return null;
 }
 
@@ -372,25 +270,39 @@ function detectOwner(text) {
 // ══════════════════════════════════════════════════════════════
 
 function extractReportDate(text) {
-  // Patterns tried in priority order (most specific first)
-  const patterns = [
-    // Forward Hebrew with slash: "תאריך תקופת הדוח: 31/03/2026"
-    /תאריך תקופת הדוח[:\s]+([0-9]{2})\/([0-9]{2})\/([0-9]{4})/,
-    /תקופת הדוח[:\s]+([0-9]{2})\/([0-9]{2})\/([0-9]{4})/,
-    /תאריך הדוח[:\s]+([0-9]{2})\/([0-9]{2})\/([0-9]{4})/,
-    // Forward Hebrew with dot
-    /תאריך תקופת הדוח[:\s]+([0-9]{2})\.([0-9]{2})\.([0-9]{4})/,
-    /תקופת הדוח[:\s]+([0-9]{2})\.([0-9]{2})\.([0-9]{4})/,
-    // Reversed Hebrew with dot: "31.12.2025 :חודה ךיראת"
+  // Label patterns — the date itself (DD/MM/YYYY or DD.MM.YYYY) is always intact
+  const dateRx = '([0-9]{2}[/.]([0-9]{2})[/.]([0-9]{4}))';
+
+  // Forward Hebrew label (spaced or not): "תאריך תקופת הדוח: 31/03/2026"
+  const labelPatterns = [
+    new RegExp(hebrewRx('תאריך תקופת הדוח').source + '[:\\s]+' + dateRx),
+    new RegExp(hebrewRx('תקופת הדוח').source + '[:\\s]+' + dateRx),
+    new RegExp(hebrewRx('תאריך הדוח').source + '[:\\s]+' + dateRx),
+    // Reversed Hebrew
     /([0-9]{2})\.([0-9]{2})\.([0-9]{4})\s*:חודה (?:ךיראת|תפוקת)/,
-    // Reversed Hebrew with slash
     /([0-9]{2})\/([0-9]{2})\/([0-9]{4})\s*:(?:חודה|הדוח)/,
-    // Generic dot pattern (last resort)
+    // Generic fallback
     /([0-9]{2})\.([0-9]{2})\.([0-9]{4})/,
   ];
-  for (const p of patterns) {
+
+  for (const p of labelPatterns) {
     const m = text.match(p);
-    if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+    if (!m) continue;
+    // The labeled patterns capture the full date in m[1], then month/year in m[2]/m[3]
+    // The simple patterns capture day/month/year in m[1]/m[2]/m[3]
+    if (m[1] && m[1].includes('/') && m[1].length === 10) {
+      // Full date DD/MM/YYYY in m[1]
+      const [day, month, year] = m[1].split('/');
+      return `${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')}`;
+    }
+    if (m[1] && m[1].includes('.') && m[1].length === 10) {
+      const [day, month, year] = m[1].split('.');
+      return `${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')}`;
+    }
+    // Simple patterns: m[1]=day, m[2]=month, m[3]=year
+    if (m[3] && m[3].length === 4) {
+      return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+    }
   }
   return null;
 }
@@ -421,25 +333,6 @@ async function extractTextFromPDF(arrayBuffer) {
 //  MAIN PARSER
 // ══════════════════════════════════════════════════════════════
 
-/**
- * parsePDF(file) → Promise<ParseResult>
- *
- * ParseResult: {
- *   institution:     string | null,
- *   reportType:      string | null,     'pension'|'study_fund'|'gemel'|'children'|'unknown'
- *   reportDate:      string | null,     ISO YYYY-MM-DD
- *   owner:           string | null,     'ציון'|'זיו'|'הראל'|'ליאם' (for children)
- *   balance:         number | null,     ₪
- *   feeFromDeposit:  number | null,     %
- *   feeFromBalance:  number | null,     %
- *   annualReturn:    number | null,     %
- *   investmentTrack: string | null,
- *   rawPreview:      string,
- *   fileName:        string,
- *   confidence:      'high'|'medium'|'low',
- *   warnings:        string[],
- * }
- */
 export async function parsePDF(file) {
   const fileName = file.name;
   const warnings = [];
@@ -468,9 +361,9 @@ export async function parsePDF(file) {
 
   if (!institution)  warnings.push('לא זוהתה חברה מנהלת.');
   if (!balance)      warnings.push('לא נמצאה יתרה/צבירה.');
-  if (!feeFromDeposit && !feeFromBalance) warnings.push('לא נמצאו דמי ניהול.');
+  if (feeFromDeposit === null && feeFromBalance === null) warnings.push('לא נמצאו דמי ניהול.');
 
-  const fieldsFound = [institution, balance, feeFromDeposit ?? feeFromBalance ?? 0].filter(v => v !== null).length;
+  const fieldsFound = [institution, balance, feeFromDeposit ?? feeFromBalance ?? null].filter(v => v !== null).length;
   const confidence  = fieldsFound >= 3 ? 'high' : fieldsFound >= 2 ? 'medium' : 'low';
 
   return {
