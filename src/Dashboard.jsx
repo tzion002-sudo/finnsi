@@ -2831,6 +2831,34 @@ const LiveMarketBar = ({ prices, fetchedAt, fetching, ghTrigger, onRefresh, stal
   );
 };
 
+// ── V2.9.4: פונקציית התאמה — parser result → asset קיים ──────────────────
+const FUND_TYPE_TO_HE = {
+  pension:    ['פנסיה'],
+  study_fund: ['השתלמות', 'קרן השתלמות'],
+  gemel:      ['גמל', 'קופת גמל', 'גמל להשקעה', 'גמל לחיסכון'],
+  children:   ['ילד', 'חיסכון לכל ילד'],
+};
+
+function matchFundToAsset(parsed, assets) {
+  return assets.filter(a => {
+    const ownerMatch = parsed.owner
+      ? (a.owner === parsed.owner)
+      : true;
+
+    const typePatterns = FUND_TYPE_TO_HE[parsed.reportType] || [];
+    const typeMatch = parsed.reportType
+      ? typePatterns.some(p => a.type?.includes(p))
+      : true;
+
+    const instMatch = parsed.institution
+      ? (a.institution?.includes(parsed.institution) ||
+         parsed.institution?.includes(a.institution))
+      : true;
+
+    return ownerMatch && typeMatch && instMatch;
+  });
+}
+
 // ══════════════════════════════════════════════════════════════
 //  DOCUMENTS TAB — V2.1.7 · מחסן דוחות רבעוניים
 //  PDF upload → זיהוי תאריך + יתרה → עדכון קופה עם source:"pdf_report"
@@ -2847,95 +2875,109 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
     if (!file) return;
     setScanning(true);
     setScanResult(null);
+    e.target.value = "";
 
     try {
-      // קריאת קובץ כ-text (PDF plain-text extraction)
-      const text = await file.text();
-      const fileName = file.name;
-      const uploadedAt = new Date().toISOString();
+      // ── 1. ניתוח PDF עם pdfParser.js ──────────────────────────
+      const parsed = await parsePDF(file);
 
-      // ─── חיפוש תאריך דוח ───
-      const dateMatch = text.match(/(\d{2})[./](\d{2})[./](20\d{2})/);
-      const reportDate = dateMatch
-        ? `${dateMatch[3]}-${dateMatch[2]}-${dateMatch[1]}`
-        : new Date().toISOString().slice(0, 10);
-
-      // ─── חיפוש יתרה כספית ─── (מחפש דפוסים נפוצים בדוחות ישראלים)
-      const balancePatterns = [
-        /סה[""]כ\s+צבירה[:\s]+([0-9,]+)/,
-        /יתרה\s+(?:לתאריך[:\s]+)?[0-9./]+[:\s]+([0-9,]+)/,
-        /Total\s+Balance[:\s]+([0-9,]+)/,
-        /([0-9]{3,3},[0-9]{3}(?:\.[0-9]{2})?)/,
-      ];
-      let balanceStr = null;
-      for (const pat of balancePatterns) {
-        const m = text.match(pat);
-        if (m) { balanceStr = m[1]; break; }
-      }
-      const balance = balanceStr ? parseFloat(balanceStr.replace(/,/g, "")) : null;
-
-      // ─── זיהוי חברה ─── מתוך שם הקובץ / טקסט
-      const COMPANY_MAP = {
-        מנורה: "מנורה מבטחים", מבטחים: "מנורה מבטחים",
-        מיטב: "מיטב דש", meitav: "מיטב דש",
-        כלל: "כלל", menora: "מנורה מבטחים",
-        אלטשולר: "אלטשולר שחם", הראל: "הראל",
-        אומגה: "אומגה",
-      };
-      let detectedInstitution = null;
-      for (const [kw, name] of Object.entries(COMPANY_MAP)) {
-        if (fileName.includes(kw) || text.includes(kw)) { detectedInstitution = name; break; }
+      // ── 2. בדיקת כפילות ──────────────────────────────────────
+      if (parsed.institution && parsed.reportType && parsed.owner && parsed.reportDate) {
+        const existingId = await findExistingSnapshot(
+          parsed.owner, parsed.reportType, parsed.institution, parsed.reportDate
+        );
+        if (existingId) {
+          setScanResult({
+            ...parsed,
+            _isDuplicate: true,
+            _existingId: existingId,
+            status: "duplicate",
+          });
+          setScanning(false);
+          return;
+        }
       }
 
-      // ─── מציאת קופה תואמת במערכת ───
-      const matchedAsset = assets.find(a =>
-        detectedInstitution && a.institution === detectedInstitution &&
-        balance != null && Math.abs(a.reportBalance - balance) / Math.max(a.reportBalance, 1) < 0.5
-      ) || assets.find(a => detectedInstitution && a.institution === detectedInstitution);
-
-      const docEntry = {
-        id: `doc_${Date.now()}`,
-        fileName,
-        uploadedAt,
-        reportDate,
-        balance,
-        institution: detectedInstitution,
-        matchedAssetId: matchedAsset?.id || null,
-        matchedAssetName: matchedAsset ? `${matchedAsset.owner} · ${matchedAsset.type}` : null,
-        status: "pending",
-        source: "pdf_report",
-      };
-
-      setScanResult(docEntry);
+      // ── 3. התאמה לקופה קיימת ──────────────────────────────────
+      const matches = matchFundToAsset(parsed, assets);
+      setScanResult({
+        ...parsed,
+        _matches: matches,
+        status: matches.length === 1 ? "matched" : matches.length > 1 ? "ambiguous" : "unmatched",
+        matchedAssetId:   matches.length === 1 ? matches[0].id   : null,
+        matchedAssetName: matches.length === 1
+          ? `${matches[0].owner} · ${matches[0].type}`
+          : null,
+      });
     } catch (err) {
-      setScanResult({ error: `שגיאה בסריקה: ${err.message}` });
+      setScanResult({ error: `שגיאה בסריקה: ${err.message}`, confidence: 'low' });
     } finally {
       setScanning(false);
-      e.target.value = "";
     }
   };
 
   /** מחיל את ממצאי הסריקה — מעדכן קופה ב-assets ושומר doc ───── */
-  const applyDocScan = () => {
+  const applyDocScan = async (assetId) => {
     if (!scanResult || scanResult.error) return;
-    const doc = { ...scanResult, status: "confirmed" };
+    const assetToUpdate = assets.find(a => a.id === assetId);
+    const assetName = assetToUpdate
+      ? `${assetToUpdate.owner} · ${assetToUpdate.type}`
+      : "לא ידוע";
 
-    // עדכן קופה אם זוהתה + יש יתרה
-    if (doc.matchedAssetId && doc.balance != null) {
-      setAssets(prev => prev.map(a => a.id !== doc.matchedAssetId ? a : {
+    // ── שמירת נקודת היסטוריה ──────────────────────────────────
+    const snapshotId = await saveFundSnapshot({
+      owner:           scanResult.owner,
+      fundType:        scanResult.reportType,
+      institution:     scanResult.institution,
+      reportDate:      scanResult.reportDate,
+      balance:         scanResult.balance,
+      ytdReturn:       scanResult.annualReturn,
+      deposited:       null,
+      fees:            null,
+      investmentTrack: scanResult.investmentTrack,
+      feeFromBalance:  scanResult.feeFromBalance,
+      feeFromDeposit:  scanResult.feeFromDeposit,
+      assetId,
+      fileName:        scanResult.fileName,
+    });
+
+    // ── עדכון יתרה נוכחית ─────────────────────────────────────
+    if (assetId && scanResult.balance != null) {
+      setAssets(prev => prev.map(a => a.id !== assetId ? a : {
         ...a,
-        reportBalance: doc.balance,
-        reportDate: doc.reportDate,
-        checkDate: doc.reportDate,
-        source: "pdf_report",
-        _reportConfirmed: true,   // V2.1.7: אייקון מסמך בטבלה
+        reportBalance:    scanResult.balance,
+        reportDate:       scanResult.reportDate,
+        checkDate:        scanResult.reportDate,
+        source:           "pdf_report",
+        _reportConfirmed: true,
       }));
-      setSaveToast(`📄 דוח קבלנה! יתרה ${fmt(doc.balance)} הוחלה ל-${doc.matchedAssetName} ✅`);
+      if (assetToUpdate) {
+        await saveAsset({ ...assetToUpdate, reportBalance: scanResult.balance,
+          reportDate: scanResult.reportDate, source: "pdf_report" });
+      }
+      setSaveToast(`📄 ${assetName}: יתרה ${fmt(scanResult.balance)} עודכנה ✅`);
     } else {
-      setSaveToast("📄 דוח נשמר במחסן — לא זוהתה קופה תואמת ב-100%");
+      setSaveToast(`📄 דוח נשמר בהיסטוריה — לא זוהתה קופה תואמת`);
     }
 
-    setDocuments(prev => [doc, ...prev]);
+    // ── שמירת רשומת ארכיון ────────────────────────────────────
+    const archiveEntry = {
+      id:           `doc_${Date.now()}`,
+      fileName:     scanResult.fileName,
+      uploadedAt:   new Date().toISOString(),
+      reportDate:   scanResult.reportDate,
+      balance:      scanResult.balance,
+      institution:  scanResult.institution,
+      owner:        scanResult.owner,
+      fundType:     scanResult.reportType,
+      matchedAssetId:   assetId,
+      matchedAssetName: assetName,
+      confidence:   scanResult.confidence,
+      snapshotId,
+      status:       "confirmed",
+      source:       "pdf_report",
+    };
+    setDocuments(prev => [archiveEntry, ...prev]);
     setScanResult(null);
   };
 
@@ -2961,44 +3003,85 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
 
       {/* תוצאת סריקה */}
       {scanResult && !scanResult.error && (
-        <div className="bg-sky-900/20 border border-sky-600/50 rounded-2xl p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 size={16} className="text-sky-400"/>
-            <h3 className="text-sky-100 font-bold text-sm">תוצאת סריקת דוח</h3>
+        <div className="bg-slate-800/60 border border-sky-700/50 rounded-2xl p-5 space-y-3">
+          {/* כותרת */}
+          <div className="flex items-center gap-2 text-sm font-semibold text-sky-300">
+            <FileText size={15}/>
+            {scanResult.institution ?? "חברה לא זוהתה"} · {
+              { pension: "פנסיה", study_fund: "השתלמות", gemel: "גמל", children: "חיסכון ילד", unknown: "לא ידוע" }[scanResult.reportType] ?? scanResult.reportType
+            } · {scanResult.owner ?? "בעלים לא זוהה"}
           </div>
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div className="bg-slate-900/50 rounded-lg p-2">
-              <div className="text-slate-400">חברה שזוהתה</div>
-              <div className="text-white font-semibold">{scanResult.institution || "לא זוהה"}</div>
-            </div>
-            <div className="bg-slate-900/50 rounded-lg p-2">
-              <div className="text-slate-400">תאריך דוח</div>
-              <div className="text-white font-semibold">{fmtDate(scanResult.reportDate)}</div>
-            </div>
-            <div className="bg-slate-900/50 rounded-lg p-2">
-              <div className="text-slate-400">יתרה שזוהתה</div>
-              <div className="text-emerald-300 font-bold font-mono">{scanResult.balance != null ? fmt(scanResult.balance) : "לא זוהתה"}</div>
-            </div>
-            <div className="bg-slate-900/50 rounded-lg p-2">
-              <div className="text-slate-400">קופה תואמת</div>
-              <div className="text-indigo-300 font-semibold">{scanResult.matchedAssetName || "לא זוהתה — תעדכן ידנית"}</div>
-            </div>
+
+          {/* נתונים */}
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div><span className="text-slate-400">יתרה:</span> <span className="text-emerald-300 font-bold">{scanResult.balance != null ? fmt(scanResult.balance) : "—"}</span></div>
+            <div><span className="text-slate-400">תאריך:</span> <span className="text-slate-200">{scanResult.reportDate ?? "—"}</span></div>
+            <div><span className="text-slate-400">תשואה YTD:</span> <span className={scanResult.annualReturn < 0 ? "text-red-400" : "text-green-400"}>{scanResult.annualReturn != null ? `${scanResult.annualReturn}%` : "—"}</span></div>
+            <div><span className="text-slate-400">מסלול:</span> <span className="text-slate-200">{scanResult.investmentTrack ?? "—"}</span></div>
           </div>
-          {scanResult.matchedAssetId && scanResult.balance != null && (
-            <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-lg p-2 text-xs text-emerald-200">
-              ✅ זיהוי מוצלח! לחץ "אשר ועדכן" כדי להחיל את היתרה ולסמן את הנתון כ-Confirmed מדוח רשמי.
+
+          {/* אזהרות */}
+          {(scanResult.warnings?.length > 0) && (
+            <div className="text-xs text-amber-400 space-y-0.5">
+              {scanResult.warnings.map((w, i) => <div key={i}>⚠️ {w}</div>)}
             </div>
           )}
-          <div className="flex gap-2 pt-1">
-            <button onClick={() => setScanResult(null)} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white text-sm py-2 rounded-lg">בטל</button>
-            <button onClick={applyDocScan} className="flex-1 bg-sky-600 hover:bg-sky-500 text-white text-sm font-bold py-2 rounded-lg flex items-center justify-center gap-1.5">
-              <CheckCircle2 size={14}/> אשר ועדכן קופה
-            </button>
-          </div>
+
+          {/* כפול */}
+          {scanResult._isDuplicate && (
+            <div className="text-amber-400 text-sm">⚠️ דוח זה כבר הועלה. לדרוס?
+              <button onClick={() => applyDocScan(scanResult._matches?.[0]?.id ?? null)}
+                className="ml-3 bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-1 rounded-lg">דרוס ושמור</button>
+              <button onClick={() => setScanResult(null)}
+                className="ml-2 bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1 rounded-lg">בטל</button>
+            </div>
+          )}
+
+          {/* התאמה ברורה */}
+          {scanResult.status === "matched" && (
+            <div className="flex items-center gap-3">
+              <span className="text-emerald-400 text-sm">✅ נמצאה קופה תואמת: <b>{scanResult.matchedAssetName}</b></span>
+              <button onClick={() => applyDocScan(scanResult.matchedAssetId)}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-4 py-1.5 rounded-xl">החל ושמור</button>
+              <button onClick={() => setScanResult(null)}
+                className="bg-slate-700 hover:bg-slate-600 text-white text-sm px-3 py-1.5 rounded-xl">בטל</button>
+            </div>
+          )}
+
+          {/* אמביגואי */}
+          {scanResult.status === "ambiguous" && (
+            <div className="space-y-2">
+              <p className="text-amber-400 text-sm">⚠️ נמצאו {scanResult._matches.length} קופות תואמות — בחר:</p>
+              {scanResult._matches.map(a => (
+                <button key={a.id} onClick={() => applyDocScan(a.id)}
+                  className="block w-full text-right bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm px-4 py-2 rounded-xl">
+                  {a.owner} · {a.type} · {a.institution}
+                </button>
+              ))}
+              <button onClick={() => setScanResult(null)}
+                className="bg-slate-700 hover:bg-slate-600 text-slate-400 text-sm px-3 py-1.5 rounded-xl">בטל</button>
+            </div>
+          )}
+
+          {/* לא נמצאה קופה */}
+          {scanResult.status === "unmatched" && (
+            <div className="flex items-center gap-3">
+              <span className="text-slate-400 text-sm">לא נמצאה קופה תואמת — הנתונים יישמרו בהיסטוריה</span>
+              <button onClick={() => applyDocScan(null)}
+                className="bg-slate-600 hover:bg-slate-500 text-white text-sm px-4 py-1.5 rounded-xl">שמור בהיסטוריה</button>
+              <button onClick={() => setScanResult(null)}
+                className="bg-slate-700 hover:bg-slate-600 text-slate-400 text-sm px-3 py-1.5 rounded-xl">בטל</button>
+            </div>
+          )}
         </div>
       )}
+
+      {/* שגיאת סריקה */}
       {scanResult?.error && (
-        <div className="bg-rose-900/20 border border-rose-700/40 rounded-xl p-3 text-xs text-rose-300">{scanResult.error}</div>
+        <div className="bg-red-900/30 border border-red-700/50 rounded-xl p-4 text-red-300 text-sm">
+          ❌ {scanResult.error}
+          <button onClick={() => setScanResult(null)} className="ml-3 text-red-400 underline text-xs">סגור</button>
+        </div>
       )}
 
       {/* רשימת דוחות */}
