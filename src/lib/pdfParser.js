@@ -78,7 +78,7 @@ function detectReportType(text) {
   // השתלמות — must check before gemel (otherwise "גמל" in mixed text wins)
   if (hebrewRx('קרן השתלמות').test(text) || hebrewRx('קרן ההשתלמות').test(text) ||
       hebrewRx('קופת ההשתלמות').test(text) || hebrewRx('קופת השתלמות').test(text)) return 'study_fund';
-  if (hebrewRx('קופת גמל').test(text) || hebrewRx('גמל להשקעה').test(text)) return 'gemel';
+  if (hebrewRx('קופת הגמל').test(text) || hebrewRx('קופת גמל').test(text) || hebrewRx('גמל להשקעה').test(text)) return 'gemel';
   return 'unknown';
 }
 
@@ -168,10 +168,20 @@ function extractBalance(text, reportType, institution) {
     if (m) return parseILNumber(m[1]);
   }
 
-  // ── E. Fallback (least preferred) ──
-  // AVOID picking start-of-year balances: skip if there's an explicit end-balance
+  // ── E. מיטב גמל / השתלמות — end balance "יתרת הכספים בחשבון ל-" ──
+  // "27,374   י ת ר ת ה כ ס פ י ם ב ח ש ב ו ן ל - 31.03.2026"
+  // "235,247  י ת ר ת ה כ ס פ י ם ב ח ש ב ו ן ל - 31.03.2026"
+  {
+    const meitavEndRx = new RegExp(
+      '([0-9]{1,3}(?:,[0-9]{3})*)\\s+' + hebrewRx('יתרת הכספים בחשבון ל').source
+    );
+    const m = text.match(meitavEndRx);
+    if (m) return parseILNumber(m[1]);
+  }
+
+  // ── F. Fallback (least preferred) ──
   const allNums = extractAllNumbers(text, 5_000, 5_000_000).filter(n => n > 5000);
-  if (allNums.length > 0) return Math.round(allNums[0]); // take FIRST big number, not max
+  if (allNums.length > 0) return Math.round(allNums[0]);
 
   return null;
 }
