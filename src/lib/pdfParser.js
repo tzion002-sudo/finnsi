@@ -73,8 +73,10 @@ function detectInstitution(text) {
 function detectReportType(text) {
   // as-invest = אלטשולר ילדים
   if (text.includes('as-invest') || hebrewRx('חיסכון לכל ילד').test(text)) return 'children';
-  if (hebrewRx('קרן פנסיה').test(text) || hebrewRx('פנסיה מבטחים').test(text)) return 'pension';
-  if (hebrewRx('קרן השתלמות').test(text) || hebrewRx('השתלמות').test(text)) return 'study_fund';
+  // פנסיה — matches "קרן פנסיה", "קרן הפנסיה", "קרן הפנסיה החדשה", "פנסיה מבטחים"
+  if (hebrewRx('קרן הפנסיה').test(text) || hebrewRx('קרן פנסיה').test(text) || hebrewRx('פנסיה מבטחים').test(text)) return 'pension';
+  // השתלמות — must check before gemel (otherwise "גמל" in mixed text wins)
+  if (hebrewRx('קרן השתלמות').test(text) || hebrewRx('קרן ההשתלמות').test(text)) return 'study_fund';
   if (hebrewRx('קופת גמל').test(text) || hebrewRx('גמל להשקעה').test(text)) return 'gemel';
   return 'unknown';
 }

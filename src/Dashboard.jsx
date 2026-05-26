@@ -847,6 +847,78 @@ const SuccessModal = ({ result, onClose, onConfirmFirestore }) => {
 //  PERFORMANCE TAB — גרף ביצועים היסטורי
 // ══════════════════════════════════════════════════════════════
 const PerformanceTab = ({ assets }) => {
+  // ── Fund history (quarterly reports) ──────────────────────────
+  const [fundHistory,     setFundHistory]     = useState([]);
+  const [historyOwner,    setHistoryOwner]    = useState('כולם');
+  const [selectedFundKey, setSelectedFundKey] = useState(null);
+
+  useEffect(() => {
+    const filters = historyOwner !== 'כולם' ? { owner: historyOwner } : {};
+    return subscribeFundHistory(filters, setFundHistory);
+  }, [historyOwner]);
+
+  const summaryChartData = useMemo(() => {
+    const byDate = {};
+    fundHistory.forEach(snap => {
+      if (!snap.reportDate || snap.balance == null) return;
+      const d = new Date(snap.reportDate);
+      const q = `Q${Math.ceil((d.getMonth() + 1) / 3)} ${d.getFullYear()}`;
+      byDate[q] = (byDate[q] || 0) + snap.balance;
+    });
+    return Object.entries(byDate)
+      .sort(([a], [b]) => {
+        const [qa, ya] = a.split(' ');
+        const [qb, yb] = b.split(' ');
+        const yd = parseInt(ya) - parseInt(yb);
+        return yd !== 0 ? yd : parseInt(qa.slice(1)) - parseInt(qb.slice(1));
+      })
+      .map(([quarter, total]) => ({ quarter, total }));
+  }, [fundHistory]);
+
+  const historyOwners = useMemo(() => {
+    const owners = [...new Set(fundHistory.map(s => s.owner).filter(Boolean))];
+    return ['כולם', ...owners];
+  }, [fundHistory]);
+
+  const detailChartData = useMemo(() => {
+    if (!selectedFundKey) return [];
+    const [owner, fundType, institution] = selectedFundKey.split('|');
+    return fundHistory
+      .filter(s => s.owner === owner && s.fundType === fundType && s.institution === institution)
+      .sort((a, b) => (a.reportDate ?? '').localeCompare(b.reportDate ?? ''))
+      .map(s => {
+        const d = new Date(s.reportDate);
+        return {
+          quarter: `Q${Math.ceil((d.getMonth() + 1) / 3)} ${d.getFullYear()}`,
+          balance: s.balance,
+          ytd: s.ytdReturn,
+          fees: s.fees,
+          deposited: s.deposited,
+        };
+      });
+  }, [fundHistory, selectedFundKey]);
+
+  const selectedFundLatest = useMemo(() =>
+    detailChartData.length ? detailChartData[detailChartData.length - 1] : null,
+  [detailChartData]);
+
+  const availableFunds = useMemo(() => {
+    const seen = new Set();
+    const FUND_LABELS = { pension: 'פנסיה', study_fund: 'השתלמות', gemel: 'גמל', children: 'חיסכון ילד' };
+    return fundHistory
+      .filter(s => s.owner && s.fundType && s.institution)
+      .filter(s => {
+        const key = `${s.owner}|${s.fundType}|${s.institution}`;
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+      })
+      .map(s => ({
+        key: `${s.owner}|${s.fundType}|${s.institution}`,
+        label: `${s.owner} · ${FUND_LABELS[s.fundType] ?? s.fundType} · ${s.institution}`,
+      }));
+  }, [fundHistory]);
+
+  // ── Existing גמל-נט performance ────────────────────────────────
   const tracksWithSeries = assets.filter(a => a.monthlySeries?.length);
 
   const chartData = useMemo(() => {
@@ -883,23 +955,161 @@ const PerformanceTab = ({ assets }) => {
     });
   }, [chartData, tracksWithSeries]);
 
+  // ── Section A: Fund History Charts (from PDF reports) ─────────
+  const fundHistorySection = (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+          <TrendingUp size={18} className="text-teal-400"/>
+          התקדמות קופות — לפי דוחות רבעוניים
+        </h2>
+        {historyOwners.length > 1 && (
+          <div className="flex gap-1 flex-wrap">
+            {historyOwners.map(o => (
+              <button key={o} onClick={() => setHistoryOwner(o)}
+                className={`text-xs px-3 py-1 rounded-full transition-colors ${
+                  historyOwner === o ? 'bg-teal-600 text-white' : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                }`}>{o}</button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {summaryChartData.length === 0 ? (
+        <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-8 text-center mb-4">
+          <FileSpreadsheet size={40} className="mx-auto text-slate-600 mb-3"/>
+          <h3 className="text-base font-semibold text-slate-300 mb-2">אין דוחות רבעוניים עדיין</h3>
+          <p className="text-sm text-slate-500">העלה דוחות PDF מחברות הביטוח/פנסיה דרך "מחסן דוחות"</p>
+        </div>
+      ) : (
+        <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 mb-4">
+          {summaryChartData.length === 1 && (
+            <p className="text-xs text-amber-400 mb-2 flex items-center gap-1">
+              ⚡ נקודת נתון אחת — העלה דוחות נוספים לראות מגמה
+            </p>
+          )}
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart data={summaryChartData} margin={{ top: 10, right: 20, bottom: 5, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155"/>
+              <XAxis dataKey="quarter" tick={{ fill: '#94a3b8', fontSize: 11 }}/>
+              <YAxis
+                tickFormatter={v => `₪${(v/1000).toFixed(0)}K`}
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                width={65}
+                domain={[dataMin => Math.max(0, dataMin * 0.85), dataMax => dataMax * 1.1]}
+              />
+              <Tooltip formatter={v => [fmt(v), 'יתרה כוללת']} contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}/>
+              <Line type="monotone" dataKey="total" stroke="#14b8a6" strokeWidth={2.5}
+                dot={{ fill: '#14b8a6', r: 5, strokeWidth: 2 }}
+                activeDot={{ r: 7 }}/>
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {availableFunds.length > 0 && (
+        <div className="mb-4">
+          <p className="text-xs text-slate-500 mb-2">לחץ על קופה לצפייה בגרף פירוט:</p>
+          <div className="flex flex-wrap gap-2">
+            {availableFunds.map(f => (
+              <button key={f.key}
+                onClick={() => setSelectedFundKey(prev => prev === f.key ? null : f.key)}
+                className={`text-xs px-3 py-1.5 rounded-xl border transition-colors ${
+                  selectedFundKey === f.key
+                    ? 'bg-teal-700 border-teal-500 text-white'
+                    : 'bg-slate-800 border-slate-600 text-slate-300 hover:border-teal-600'
+                }`}>{f.label}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {selectedFundKey && detailChartData.length > 0 && (
+        <div className="bg-slate-800/60 border border-teal-700/50 rounded-2xl p-5 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-teal-300">
+              📊 {selectedFundKey.split('|')[2]} · {
+                ({ pension:'פנסיה', study_fund:'השתלמות', gemel:'גמל', children:'חיסכון ילד' })[selectedFundKey.split('|')[1]]
+              } · {selectedFundKey.split('|')[0]}
+            </h3>
+            <button onClick={() => setSelectedFundKey(null)} className="text-slate-500 hover:text-slate-300 text-lg">×</button>
+          </div>
+          {detailChartData.length === 1 && (
+            <p className="text-xs text-amber-400 mb-2">⚡ נקודת נתון אחת — הגרף יתמלא עם דוחות נוספים</p>
+          )}
+          <ResponsiveContainer width="100%" height={180}>
+            <LineChart data={detailChartData} margin={{ top: 10, right: 20, bottom: 5, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155"/>
+              <XAxis dataKey="quarter" tick={{ fill: '#94a3b8', fontSize: 10 }}/>
+              <YAxis
+                tickFormatter={v => `₪${(v/1000).toFixed(0)}K`}
+                tick={{ fill: '#94a3b8', fontSize: 10 }}
+                width={55}
+                domain={[dataMin => Math.max(0, dataMin * 0.9), dataMax => dataMax * 1.08]}
+              />
+              <Tooltip
+                formatter={(v, n) => [n === 'balance' ? fmt(v) : `${v}%`, n === 'balance' ? 'יתרה' : 'תשואה YTD']}
+                contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}
+              />
+              <Line type="monotone" dataKey="balance" stroke="#14b8a6" strokeWidth={2}
+                dot={{ fill: '#14b8a6', r: 5 }} activeDot={{ r: 7 }} name="balance"/>
+            </LineChart>
+          </ResponsiveContainer>
+          {selectedFundLatest && (
+            <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3">
+              {selectedFundLatest.balance != null && (
+                <div className="bg-slate-700/50 rounded-lg p-2 text-center">
+                  <p className="text-[10px] text-slate-400 mb-0.5">יתרה אחרונה</p>
+                  <p className="text-sm font-bold text-teal-300">{fmt(selectedFundLatest.balance)}</p>
+                </div>
+              )}
+              {selectedFundLatest.ytd != null && (
+                <div className="bg-slate-700/50 rounded-lg p-2 text-center">
+                  <p className="text-[10px] text-slate-400 mb-0.5">תשואה YTD</p>
+                  <p className={`text-sm font-bold ${selectedFundLatest.ytd < 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {selectedFundLatest.ytd > 0 ? '+' : ''}{selectedFundLatest.ytd}%
+                  </p>
+                </div>
+              )}
+              {selectedFundLatest.deposited != null && (
+                <div className="bg-slate-700/50 rounded-lg p-2 text-center">
+                  <p className="text-[10px] text-slate-400 mb-0.5">הפקדות ברבעון</p>
+                  <p className="text-sm font-bold text-blue-300">{fmt(selectedFundLatest.deposited)}</p>
+                </div>
+              )}
+              {selectedFundLatest.fees != null && (
+                <div className="bg-slate-700/50 rounded-lg p-2 text-center">
+                  <p className="text-[10px] text-slate-400 mb-0.5">דמי ניהול</p>
+                  <p className="text-sm font-bold text-orange-300">{fmt(selectedFundLatest.fees)}</p>
+                </div>
+              )}
+            </div>
+          )}
+          <p className="text-xs text-slate-500 mt-2">{detailChartData.length} דוחות בהיסטוריה</p>
+        </div>
+      )}
+    </div>
+  );
+
   if (!tracksWithSeries.length) {
     return (
-      <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-10 text-center">
-        <FileSpreadsheet size={48} className="mx-auto text-slate-600 mb-3"/>
-        <h3 className="text-lg font-semibold text-slate-300 mb-2">אין עדיין נתוני ביצועים</h3>
-        <p className="text-sm text-slate-500 mb-4">
-          העלה קובץ גמל-נט כדי לראות גרף תשואות חודשי לאורך השנה האחרונה.
-        </p>
-        <p className="text-xs text-slate-600">
-          הגרף יבנה אוטומטית עבור כל קופה שיש לה נתוני סדרה חודשית מהקובץ.
-        </p>
+      <div>
+        {fundHistorySection}
+        <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-10 text-center">
+          <FileSpreadsheet size={48} className="mx-auto text-slate-600 mb-3"/>
+          <h3 className="text-lg font-semibold text-slate-300 mb-2">אין נתוני גמל-נט</h3>
+          <p className="text-sm text-slate-500 mb-4">
+            העלה קובץ גמל-נט כדי לראות גרף תשואות חודשי לאורך השנה האחרונה.
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
     <div>
+      {fundHistorySection}
+
       <div className="mb-6">
         <h2 className="text-lg font-bold text-slate-100 mb-1 flex items-center gap-2">
           <TrendingUp size={18} className="text-emerald-400"/>
@@ -1193,17 +1403,6 @@ function ymToHebrew(ym) {
 const SavingsTab = ({ savings, setSavings }) => {
   const [newRow, setNewRow] = useState({ ym: new Date().toISOString().slice(0,7), amount: "", notes: "" });
 
-  // V2.9.4 — Fund history for charts
-  const [fundHistory, setFundHistory] = useState([]);
-  const [historyOwner, setHistoryOwner] = useState('כולם');
-  const [selectedFundKey, setSelectedFundKey] = useState(null); // "owner|fundType|institution"
-
-  useEffect(() => {
-    const filters = historyOwner !== 'כולם' ? { owner: historyOwner } : {};
-    const unsub = subscribeFundHistory(filters, setFundHistory);
-    return unsub;
-  }, [historyOwner]);
-
   const addSaving = () => {
     if (!newRow.ym || !newRow.amount) return;
     const id = "sv" + Date.now();
@@ -1238,70 +1437,6 @@ const SavingsTab = ({ savings, setSavings }) => {
     });
   }, [sorted]);
 
-  // V2.9.4 — Summary chart: סה"כ יתרה לפי רבעון (לבעל נבחר)
-  const summaryChartData = useMemo(() => {
-    const byDate = {};
-    fundHistory.forEach(snap => {
-      if (!snap.reportDate || snap.balance == null) return;
-      const d = new Date(snap.reportDate);
-      const q = `Q${Math.ceil((d.getMonth() + 1) / 3)} ${d.getFullYear()}`;
-      byDate[q] = (byDate[q] || 0) + snap.balance;
-    });
-    return Object.entries(byDate)
-      .sort(([a], [b]) => {
-        const [qa, ya] = a.split(' '); // e.g. "Q3", "2025"
-        const [qb, yb] = b.split(' ');
-        const yearDiff = parseInt(ya) - parseInt(yb);
-        if (yearDiff !== 0) return yearDiff;
-        return parseInt(qa.slice(1)) - parseInt(qb.slice(1)); // Q1→1, Q2→2, etc.
-      })
-      .map(([quarter, total]) => ({ quarter, total }));
-  }, [fundHistory]);
-
-  // רשימת בעלים ייחודיים מהיסטוריה
-  const historyOwners = useMemo(() => {
-    const owners = [...new Set(fundHistory.map(s => s.owner).filter(Boolean))];
-    return ['כולם', ...owners];
-  }, [fundHistory]);
-
-  // V2.9.4 — Detail chart לקופה נבחרת
-  const detailChartData = useMemo(() => {
-    if (!selectedFundKey) return [];
-    const [owner, fundType, institution] = selectedFundKey.split('|');
-    return fundHistory
-      .filter(s => s.owner === owner && s.fundType === fundType && s.institution === institution)
-      .sort((a, b) => (a.reportDate ?? '').localeCompare(b.reportDate ?? ''))
-      .map(s => {
-        const d = new Date(s.reportDate);
-        return {
-          quarter: `Q${Math.ceil((d.getMonth() + 1) / 3)} ${d.getFullYear()}`,
-          balance: s.balance,
-          ytd:     s.ytdReturn,
-        };
-      });
-  }, [fundHistory, selectedFundKey]);
-
-  const selectedFundLatest = useMemo(() =>
-    detailChartData.length ? detailChartData[detailChartData.length - 1] : null,
-  [detailChartData]);
-
-  // V2.9.4 — רשימת קופות ייחודיות מהיסטוריה לבחירה
-  const availableFunds = useMemo(() => {
-    const seen = new Set();
-    return fundHistory
-      .filter(s => s.owner && s.fundType && s.institution)
-      .filter(s => {
-        const key = `${s.owner}|${s.fundType}|${s.institution}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .map(s => ({
-        key: `${s.owner}|${s.fundType}|${s.institution}`,
-        label: `${s.owner} · ${{ pension: 'פנסיה', study_fund: 'השתלמות', gemel: 'גמל', children: 'חיסכון ילד' }[s.fundType] ?? s.fundType} · ${s.institution}`,
-      }));
-  }, [fundHistory]);
-
   return (
     <div>
       {/* כותרת */}
@@ -1320,90 +1455,6 @@ const SavingsTab = ({ savings, setSavings }) => {
           </p>
         </div>
       </div>
-
-      {/* V2.9.4 — גרף מסכם קופות רבעוני */}
-      {summaryChartData.length > 0 && (
-        <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 mb-5">
-          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-            <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2">
-              <TrendingUp size={14} className="text-teal-400"/> התקדמות קופות לאורך זמן
-            </h3>
-            <div className="flex gap-1">
-              {historyOwners.map(o => (
-                <button key={o} onClick={() => setHistoryOwner(o)}
-                  className={`text-xs px-3 py-1 rounded-full transition-colors ${
-                    historyOwner === o
-                      ? 'bg-teal-600 text-white'
-                      : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                  }`}>{o}</button>
-              ))}
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={summaryChartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155"/>
-              <XAxis dataKey="quarter" tick={{ fill: '#94a3b8', fontSize: 11 }}/>
-              <YAxis tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} tick={{ fill: '#94a3b8', fontSize: 11 }} width={60}/>
-              <Tooltip formatter={(v) => [fmt(v), 'יתרה כוללת']} contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}/>
-              <Line type="monotone" dataKey="total" stroke="#14b8a6" strokeWidth={2} dot={{ fill: '#14b8a6', r: 4 }}/>
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {/* V2.9.4 — בחירת קופה לגרף פירוט */}
-      {availableFunds.length > 0 && (
-        <div className="mb-4">
-          <p className="text-xs text-slate-500 mb-2">לחץ על קופה לצפייה בגרף פירוט:</p>
-          <div className="flex flex-wrap gap-2">
-            {availableFunds.map(f => (
-              <button key={f.key}
-                onClick={() => setSelectedFundKey(prev => prev === f.key ? null : f.key)}
-                className={`text-xs px-3 py-1.5 rounded-xl border transition-colors ${
-                  selectedFundKey === f.key
-                    ? 'bg-teal-700 border-teal-500 text-white'
-                    : 'bg-slate-800 border-slate-600 text-slate-300 hover:border-teal-600'
-                }`}>{f.label}</button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* V2.9.4 — כרטיס קופה מורחב */}
-      {selectedFundKey && detailChartData.length > 0 && (
-        <div className="bg-slate-800/60 border border-teal-700/50 rounded-2xl p-5 mb-5">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-teal-300">
-              📊 {selectedFundKey.split('|')[2]} · {
-                ({ pension: 'פנסיה', study_fund: 'השתלמות', gemel: 'גמל', children: 'חיסכון ילד' })[selectedFundKey.split('|')[1]]
-              } · {selectedFundKey.split('|')[0]}
-            </h3>
-            <button onClick={() => setSelectedFundKey(null)}
-              className="text-slate-500 hover:text-slate-300 text-lg leading-none">×</button>
-          </div>
-
-          <ResponsiveContainer width="100%" height={160}>
-            <LineChart data={detailChartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155"/>
-              <XAxis dataKey="quarter" tick={{ fill: '#94a3b8', fontSize: 10 }}/>
-              <YAxis tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} tick={{ fill: '#94a3b8', fontSize: 10 }} width={55}/>
-              <Tooltip formatter={(v, n) => [n === 'balance' ? fmt(v) : `${v}%`, n === 'balance' ? 'יתרה' : 'תשואה YTD']}
-                contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}/>
-              <Line type="monotone" dataKey="balance" stroke="#14b8a6" strokeWidth={2} dot={{ fill: '#14b8a6', r: 4 }} name="balance"/>
-            </LineChart>
-          </ResponsiveContainer>
-
-          {selectedFundLatest?.ytd != null && (
-            <div className="mt-3 flex items-center gap-2 text-sm">
-              <span className="text-slate-400">תשואה YTD:</span>
-              <span className={selectedFundLatest.ytd < 0 ? "text-red-400 font-bold" : "text-green-400 font-bold"}>
-                {selectedFundLatest.ytd > 0 ? '+' : ''}{selectedFundLatest.ytd}%
-              </span>
-              <span className="text-slate-500 text-xs">({detailChartData.length} דוחות בהיסטוריה)</span>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* כרטיסי סיכום — צבעי ירוק/כחול */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
