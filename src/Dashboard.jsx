@@ -1,7 +1,9 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { parsePDF } from './lib/pdfParser';
 import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, saveSettings, deleteAsset,
          subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
-         subscribeToSettings, subscribeToAlerts } from './lib/firestoreService';
+         subscribeToSettings, subscribeToAlerts,
+         saveFundSnapshot, findExistingSnapshot, subscribeFundHistory } from './lib/firestoreService';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
