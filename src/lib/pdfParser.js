@@ -76,7 +76,8 @@ function detectReportType(text) {
   // פנסיה — matches "קרן פנסיה", "קרן הפנסיה", "קרן הפנסיה החדשה", "פנסיה מבטחים"
   if (hebrewRx('קרן הפנסיה').test(text) || hebrewRx('קרן פנסיה').test(text) || hebrewRx('פנסיה מבטחים').test(text)) return 'pension';
   // השתלמות — must check before gemel (otherwise "גמל" in mixed text wins)
-  if (hebrewRx('קרן השתלמות').test(text) || hebrewRx('קרן ההשתלמות').test(text)) return 'study_fund';
+  if (hebrewRx('קרן השתלמות').test(text) || hebrewRx('קרן ההשתלמות').test(text) ||
+      hebrewRx('קופת ההשתלמות').test(text) || hebrewRx('קופת השתלמות').test(text)) return 'study_fund';
   if (hebrewRx('קופת גמל').test(text) || hebrewRx('גמל להשקעה').test(text)) return 'gemel';
   return 'unknown';
 }
@@ -225,12 +226,19 @@ function extractFees(text) {
 function extractReturn(text) {
   // RTL layout: "-4.04%   מ ס ל ו ל ע ו ק ב מ ד ד   S&P 500"
   const returnPatterns = [
+    // מנורה 2026: "-4.04%   מסלול עוקב מדד S&P 500"
     new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('מסלול עוקב מדד').source),
     /מסלול עוקב מדד\s+(-?[0-9]+\.[0-9]+)%/,
+    // מיטב: "0.54%   -5.57%   מיטב השתלמות עוקב מדד S&P500"
+    // Format: [cost%]  [return%]  [fund name]  S&P
+    /[0-9.]+%\s+(-?[0-9]+\.[0-9]+)%\s+(?:[^\n]*?)S&P/i,
+    // General forward YTD return patterns
     /תשואה מתחילת שנה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
     /תשואה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
     /שיעור תשואה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
+    // אלטשולר ילדים
     /([0-9]+\.[0-9]+)%\s+רבגומ ןוכיס/,
+    // Generic reversed
     /([0-9]+\.[0-9]+)%\s+(?:תיתנש האושת|האושת)/,
     /([+-]?[0-9]+\.[0-9]+)%\s+(?:יתנש|יתנש האושת)/,
   ];
