@@ -16,7 +16,7 @@
 import {
   collection, doc, getDoc, getDocs, setDoc, addDoc,
   deleteDoc, onSnapshot, serverTimestamp,
-  writeBatch, query, where,
+  writeBatch, query, where, orderBy,
 } from 'firebase/firestore';
 import { db, isFirebaseReady } from './firebase';
 
@@ -468,4 +468,75 @@ export async function getMarketHistory(date) {
     console.error('getMarketHistory:', e);
     return null;
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  FUND HISTORY — V2.9.4
+//  קולקציה: families/mizrahi/fund_history/{autoId}
+//  כל מסמך = דוח רבעוני אחד של קופה אחת
+// ════════════════════════════════════════════════════════════════════════════
+
+const fundHistoryCol = () => collection(db, 'families', FAMILY_ID, 'fund_history');
+
+/**
+ * שומר נקודת היסטוריה חדשה (דוח רבעוני שהועלה).
+ * מחזיר את ה-docId שנוצר.
+ */
+export async function saveFundSnapshot(snapshot) {
+  if (!isFirebaseReady()) {
+    console.warn('saveFundSnapshot: Firebase not ready, skipping');
+    return null;
+  }
+  const ref = await addDoc(fundHistoryCol(), {
+    owner:           snapshot.owner           ?? null,
+    fundType:        snapshot.fundType         ?? null,
+    institution:     snapshot.institution      ?? null,
+    reportDate:      snapshot.reportDate       ?? null,
+    balance:         snapshot.balance          ?? null,
+    ytdReturn:       snapshot.ytdReturn        ?? null,
+    deposited:       snapshot.deposited        ?? null,
+    fees:            snapshot.fees             ?? null,
+    investmentTrack: snapshot.investmentTrack  ?? null,
+    feeFromBalance:  snapshot.feeFromBalance   ?? null,
+    feeFromDeposit:  snapshot.feeFromDeposit   ?? null,
+    assetId:         snapshot.assetId          ?? null,
+    fileName:        snapshot.fileName         ?? null,
+    uploadedAt:      new Date().toISOString(),
+  });
+  return ref.id;
+}
+
+/**
+ * בודק אם דוח עם אותו owner+fundType+institution+reportDate כבר קיים.
+ * מחזיר docId אם קיים, null אם לא.
+ */
+export async function findExistingSnapshot(owner, fundType, institution, reportDate) {
+  if (!isFirebaseReady()) return null;
+  const q = query(
+    fundHistoryCol(),
+    where('owner',       '==', owner),
+    where('fundType',    '==', fundType),
+    where('institution', '==', institution),
+    where('reportDate',  '==', reportDate),
+  );
+  const snap = await getDocs(q);
+  return snap.empty ? null : snap.docs[0].id;
+}
+
+/**
+ * Real-time listener להיסטוריית קופה.
+ * filters: { owner?, fundType?, institution? } — כל שדה אופציונלי.
+ * מחזיר unsubscribe function.
+ */
+export function subscribeFundHistory(filters, onData) {
+  if (!isFirebaseReady()) { onData([]); return () => {}; }
+  const constraints = [];
+  if (filters.owner)       constraints.push(where('owner',       '==', filters.owner));
+  if (filters.fundType)    constraints.push(where('fundType',    '==', filters.fundType));
+  if (filters.institution) constraints.push(where('institution', '==', filters.institution));
+  constraints.push(orderBy('reportDate', 'asc'));
+  const q = query(fundHistoryCol(), ...constraints);
+  return onSnapshot(q, snap =>
+    onData(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+  );
 }
