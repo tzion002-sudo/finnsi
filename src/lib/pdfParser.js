@@ -26,7 +26,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
 const INSTITUTIONS = [
   {
     key: 'מנורה',
-    forward:  ['מנורה מבטחים', 'מנורה פנסיה', 'Menora'],
+    forward:  ['מנורה מבטחים', 'מנורה פנסיה', 'Menora', 'menoramivt'],
     reversed: ['היסנפ םיחטבמ הרונמ', 'היסנפ הרונמ'],
   },
   {
@@ -138,9 +138,14 @@ function extractAllNumbers(text, minVal = 0, maxVal = 100_000_000) {
 function extractBalance(text, reportType, institution) {
 
   // ── A. קרן פנסיה מנורה ──
-  // Pattern: "669,720.72 194,250.50 246,001.54 229,468.68 -ל רבטצמה ןוכסיחה תרתי"
-  // The accumulated total appears as the FIRST (largest) number in this line
   if (reportType === 'pension' && institution?.includes('מנורה')) {
+    // 2026 format (forward Hebrew): "יתרת הכספים בקרן לתאריך 31/03/2026 657,178"
+    // This is the END-of-period balance (correct value)
+    const endBalancePattern = /יתרת הכספים בקרן לתאריך[^0-9]*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)/;
+    const mEnd = text.match(endBalancePattern);
+    if (mEnd) return parseILNumber(mEnd[1]);
+
+    // Older reversed format: "669,720.72 194,250.50 246,001.54 229,468.68 -ל רבטצמה ןוכסיחה תרתי"
     const pensionPattern = /([0-9]{3,3},[0-9]{3}\.[0-9]{2})\s+[0-9,.]+ [0-9,.]+ [0-9,.]+\s+-ל\s+רבטצמה ןוכסיחה תרתי/;
     const m = text.match(pensionPattern);
     if (m) return parseILNumber(m[1]);
@@ -246,15 +251,17 @@ function extractFees(text) {
 
   // ── Fee from savings (accumulation) ──
   const feeBalancePatterns = [
-    // מנורה: "0.11% ןוכסיחמ לוהינה ימד רועיש"
+    // מנורה 2026 forward: "דמי ניהול מחיסכון 0.05%"
+    /דמי ניהול מחיסכון[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
+    // General forward
+    /דמי ניהול מצבירה[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
+    /ד.נ. מצבירה[^%0-9]{0,20}([0-9]+\.?[0-9]*)%/,
+    // מנורה reversed: "0.11% ןוכסיחמ לוהינה ימד רועיש"
     /([0-9]+\.[0-9]+)%\s+ןוכסיחמ לוהינה ימד רועיש/,
     // כלל: "0.68% 0.68% ... ןוכסיחמ לוהינ"
     /([0-9]+\.[0-9]+)%\s+[0-9.%\s]+ןוכסיחמ לוהינ/,
     // אלטשולר: "0.23% ןוכסיחמ לוהינ ימד"
     /([0-9]+\.[0-9]+)%\s+ןוכסיחמ לוהינ ימד/,
-    // General forward
-    /דמי ניהול מצבירה[^%0-9]{0,30}([0-9]+\.?[0-9]*)%/,
-    /ד.נ. מצבירה[^%0-9]{0,20}([0-9]+\.?[0-9]*)%/,
     // Numeric extraction: percentage followed by "savings fee" keywords
     /([0-9]+\.[0-9]+)%\s+(?:ןוכסיחמ|הריבצמ)/,
   ];
@@ -300,11 +307,14 @@ function extractFees(text) {
  */
 function extractReturn(text) {
   const returnPatterns = [
-    // אלטשולר ילדים: "20.54% רבגומ ןוכיס"
-    /([0-9]+\.[0-9]+)%\s+רבגומ ןוכיס/,
-    // Forward Israeli patterns
+    // מנורה 2026 forward: "מסלול עוקב מדד -4.04% S&P 500"
+    /מסלול עוקב מדד\s+(-?[0-9]+\.[0-9]+)%/,
+    // General forward YTD return patterns
+    /תשואה מתחילת שנה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
     /תשואה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
     /שיעור תשואה[^%0-9]{0,20}(-?[0-9]+\.?[0-9]*)%/,
+    // אלטשולר ילדים: "20.54% רבגומ ןוכיס"
+    /([0-9]+\.[0-9]+)%\s+רבגומ ןוכיס/,
     // Generic reversed patterns
     /([0-9]+\.[0-9]+)%\s+(?:תיתנש האושת|האושת)/,
     /([+-]?[0-9]+\.[0-9]+)%\s+(?:יתנש|יתנש האושת)/,
@@ -353,7 +363,7 @@ function detectOwner(text) {
   if (text.includes('יול לארה') || text.includes('הראל יול')) return 'הראל';
   if (text.includes('יול םאיל') || text.includes('ליאם יול')) return 'ליאם';
   if (text.includes('יול ויז') || text.includes('זיו יול'))  return 'זיו';
-  if (text.includes('יול ןויצ') || text.includes('ציון יול')) return 'ציון';
+  if (text.includes('יול ןויצ') || text.includes('ציון לוי')) return 'ציון';
   return null;
 }
 
@@ -362,10 +372,20 @@ function detectOwner(text) {
 // ══════════════════════════════════════════════════════════════
 
 function extractReportDate(text) {
-  // Common pattern in all reports: "31.12.2025 :חודה ךיראת" or "31/12/2025"
+  // Patterns tried in priority order (most specific first)
   const patterns = [
+    // Forward Hebrew with slash: "תאריך תקופת הדוח: 31/03/2026"
+    /תאריך תקופת הדוח[:\s]+([0-9]{2})\/([0-9]{2})\/([0-9]{4})/,
+    /תקופת הדוח[:\s]+([0-9]{2})\/([0-9]{2})\/([0-9]{4})/,
+    /תאריך הדוח[:\s]+([0-9]{2})\/([0-9]{2})\/([0-9]{4})/,
+    // Forward Hebrew with dot
+    /תאריך תקופת הדוח[:\s]+([0-9]{2})\.([0-9]{2})\.([0-9]{4})/,
+    /תקופת הדוח[:\s]+([0-9]{2})\.([0-9]{2})\.([0-9]{4})/,
+    // Reversed Hebrew with dot: "31.12.2025 :חודה ךיראת"
     /([0-9]{2})\.([0-9]{2})\.([0-9]{4})\s*:חודה (?:ךיראת|תפוקת)/,
-    /([0-9]{2})\/([0-9]{2})\/([0-9]{4})\s*:חודה/,
+    // Reversed Hebrew with slash
+    /([0-9]{2})\/([0-9]{2})\/([0-9]{4})\s*:(?:חודה|הדוח)/,
+    // Generic dot pattern (last resort)
     /([0-9]{2})\.([0-9]{2})\.([0-9]{4})/,
   ];
   for (const p of patterns) {
