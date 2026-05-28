@@ -103,31 +103,41 @@ async function tasePriceILS(shareId, yahooTicker) {
   } catch {}
 
   // ── מקור 2: Investing.com — HTML scrape, מחיר ב-אגורות → ÷100 = ₪ ───
-  // נבדק: מחזיר 4,280 ל-1183441 (= ₪42.80) ו-471,100 ל-1159243 (= ₪4,711)
+  // V2.9.8: שימוש ב-global fetch (Node 18+) במקום https.request — Cloudflare מחזיר 403 ל-https.request
+  // נבדק: 1183441 → 4,266 (₪42.66) · 1159243 → 486,600 (₪4,866)
   const investingUrl = INVESTING_COM_URLS[id];
   if (investingUrl) {
     try {
-      const { status, body: html } = await httpsRequest(investingUrl, {
-        timeout: 15000,
+      const ctrl = new AbortController();
+      const tid  = setTimeout(() => ctrl.abort(), 15000);
+      const res  = await fetch(investingUrl, {
+        signal: ctrl.signal,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
           "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
       });
-      if (status === 200 && typeof html === "string") {
-        // מחפש: instrument-price-last">4,280</  (מחיר ב-אגורות)
+      clearTimeout(tid);
+      if (res.ok) {
+        const html = await res.text();
+        // מחפש: instrument-price-last">4,266</  (מחיר ב-אגורות)
         const m = html.match(/instrument-price-last[^>]*>([\d,\.]+)</);
         if (m) {
           const raw  = parseFloat(m[1].replace(/,/g, ""));
-          if (!isNaN(raw) && raw > 100) {             // ודא שמחיר ב-אגורות (> 100)
+          if (!isNaN(raw) && raw > 100) {                  // ודא שמחיר ב-אגורות (> 100)
             const cur = parseFloat((raw / 100).toFixed(4)); // אגורות → ₪
-            console.log(`    ✅ Investing.com: ${id} = ₪${cur} (${raw} אגורות)`);
-            return { price: cur, changePct: null, source: "Investing.com (TASE)", isFallback: false };
+            // נסה לחלץ גם שינוי יומי %
+            const chgMatch = html.match(/instrument-price-change-percent[^>]*>\(([+-]?[\d,\.]+)%\)/);
+            const chg = chgMatch ? parseFloat(chgMatch[1].replace(/,/g, "")) : null;
+            console.log(`    ✅ Investing.com: ${id} = ₪${cur} (${raw} אגורות${chg != null ? `, ${chg}%` : ''})`);
+            return { price: cur, changePct: chg, source: "Investing.com (TASE)", isFallback: false };
           }
         }
+      } else {
+        console.log(`    ⚠ Investing.com ${id}: HTTP ${res.status}`);
       }
-    } catch {}
+    } catch (e) { console.log(`    ⚠ Investing.com ${id}: ${e.message}`); }
   }
 
   // ── מקור 3: Stooq.com — CSV, מחיר ב-ILS ישירות ──────────────────────
@@ -557,6 +567,8 @@ async function fetchExcellenceHistory(realPrices) {
       }
 
       if (cfg.isTaseFund) {
+        // V2.9.8 — שמור ברים סינתטיים גולמיים (idx × FX). העיגון למחיר החי
+        // נעשה ב-UI (scaleAnchorBars) כדי להישאר עקבי בין backfill ל-incremental.
         if (!fxBars) fxBars = await yahooChartBars("ILS=X", isBackfill ? "3y" : "10d");
         if (!fxBars || fxBars.length === 0) {
           console.warn(`  ⚠ ${cfg.id}: אין FX bars — מדלג`);
@@ -564,18 +576,10 @@ async function fetchExcellenceHistory(realPrices) {
         }
         const fxMap = new Map(fxBars.map(b => [b.d, b.c]));
         const lastFx = fxBars[fxBars.length - 1].c;
-        bars = bars.map(b => ({ d: b.d, c: b.c * (fxMap.get(b.d) ?? lastFx) }));
-
-        // Anchor synthetic series to current real fund price (so latest bar = real)
-        const realPrice = realPrices?.[cfg.realKey];
-        if (realPrice && bars.length > 0 && bars[bars.length - 1].c > 0) {
-          const scale = realPrice / bars[bars.length - 1].c;
-          bars = bars.map(b => ({ d: b.d, c: parseFloat((b.c * scale).toFixed(4)) }));
-          console.log(`  📐 ${cfg.id}: scale=${scale.toFixed(4)} → latest=₪${realPrice}`);
-        } else {
-          bars = bars.map(b => ({ d: b.d, c: parseFloat(b.c.toFixed(4)) }));
-          console.log(`  ℹ ${cfg.id}: ללא עיגון (אין מחיר אמיתי כיום)`);
-        }
+        bars = bars.map(b => ({
+          d: b.d,
+          c: parseFloat((b.c * (fxMap.get(b.d) ?? lastFx)).toFixed(4)),
+        }));
       } else {
         bars = bars.map(b => ({ d: b.d, c: parseFloat(b.c.toFixed(4)) }));
       }
