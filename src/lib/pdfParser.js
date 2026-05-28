@@ -240,9 +240,11 @@ function extractReturn(text) {
     new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('מסלול עוקב מדד').source),
     /מסלול עוקב מדד\s+(-?[0-9]+\.[0-9]+)%/,
     // V2.9.9 — כלל (לאחר normalizeReversedPercentages): "1.34%   כלל השתלמות כללי"
+    //          ולקופת גמל "כלל תמר": "-5.90%   כלל תמר עוקב מדד s&p 500"
     new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל השתלמות').source),
     new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל פנסיה').source),
     new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל גמל').source),
+    new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל תמר').source),
     // מיטב: "0.54%   -5.57%   מיטב השתלמות עוקב מדד S&P500"
     // Format: [cost%]  [return%]  [fund name]  S&P
     /[0-9.]+%\s+(-?[0-9]+\.[0-9]+)%\s+(?:[^\n]*?)S&P/i,
@@ -345,14 +347,15 @@ function extractReportDate(text) {
  * מזה כי המספרים בתאים נפרדים מספיק.
  */
 function normalizeReversedPercentages(text) {
+  // צורה הפוכה: "% 4 3 . 1"            (= +1.34%)
+  // צורה שלילית: "% 0 9 . 5 -"          (= -5.90%) — המינוס נכתב אחרי הספרות ב-RTL
   return text.replace(
-    /%\s+((?:\d\s*){1,3})\.\s*((?:\d\s*){1,3})(?=\s|$)/g,
-    (match, decPartRaw, wholePartRaw) => {
+    /%\s+((?:\d\s*){1,3})\.\s*((?:\d\s*){1,3})\s*(-?)(?=\s|$)/g,
+    (match, decPartRaw, wholePartRaw, sign) => {
       const dec   = decPartRaw.replace(/\s+/g, '').split('').reverse().join('');
       const whole = wholePartRaw.replace(/\s+/g, '').split('').reverse().join('');
-      // sanity: ערך סביר לתשואה/דמי-ניהול (0–99 שלמים, 0–99 עשרוני)
       if (!whole || !dec) return match;
-      return `${whole}.${dec}%`;
+      return `${sign}${whole}.${dec}%`;
     }
   );
 }

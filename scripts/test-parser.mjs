@@ -8,12 +8,12 @@ function hebrewRx(str) {
 
 function normalizeReversedPercentages(text) {
   return text.replace(
-    /%\s+((?:\d\s*){1,3})\.\s*((?:\d\s*){1,3})(?=\s|$)/g,
-    (match, decPartRaw, wholePartRaw) => {
+    /%\s+((?:\d\s*){1,3})\.\s*((?:\d\s*){1,3})\s*(-?)(?=\s|$)/g,
+    (match, decPartRaw, wholePartRaw, sign) => {
       const dec   = decPartRaw.replace(/\s+/g, '').split('').reverse().join('');
       const whole = wholePartRaw.replace(/\s+/g, '').split('').reverse().join('');
       if (!whole || !dec) return match;
-      return `${whole}.${dec}%`;
+      return `${sign}${whole}.${dec}%`;
     }
   );
 }
@@ -42,6 +42,7 @@ async function testPDF(path, label) {
   const pensionEndRx = new RegExp('([0-9]{1,3}(?:,[0-9]{3})*)\\s+' + hebrewRx('יתרת הכספים בקרן לתאריך').source);
 
   const returnRxClalHasht = new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל השתלמות').source);
+  const returnRxClalTamar = new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל תמר').source);
   const returnRxMenora    = new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('מסלול עוקב מדד').source);
   const returnRxMeitav    = /[0-9.]+%\s+(-?[0-9]+\.[0-9]+)%\s+(?:[^\n]*?)S&P/i;
 
@@ -49,6 +50,7 @@ async function testPDF(path, label) {
   const ytd =
     fullText.match(returnRxMenora)?.[1] ??
     fullText.match(returnRxClalHasht)?.[1] ??
+    fullText.match(returnRxClalTamar)?.[1] ??
     fullText.match(returnRxMeitav)?.[1] ?? 'NOT FOUND';
 
   console.log(`\n=== ${label} ===`);
@@ -61,3 +63,4 @@ await testPDF('C:/Users/tzion/Desktop/חסכונות משפחת לוי/פנסי�
 await testPDF('C:/Users/tzion/Desktop/חסכונות משפחת לוי/March 0.pdf',      'March 0 (מיטב השתלמות)');
 await testPDF('C:/Users/tzion/Desktop/חסכונות משפחת לוי/March 0 (1).pdf',  'March 0 (1) (מיטב גמל)');
 await testPDF('C:/Users/tzion/Desktop/Report_01_2026.pdf',                  'Report_01_2026 (כלל השתלמות זיו)');
+await testPDF('C:/Users/tzion/Desktop/Report_01_2026 (1).pdf',              'Report_01_2026 (1) (כלל גמל תמר זיו)');
