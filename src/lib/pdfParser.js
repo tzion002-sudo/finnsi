@@ -239,6 +239,10 @@ function extractReturn(text) {
     // מנורה 2026: "-4.04%   מסלול עוקב מדד S&P 500"
     new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('מסלול עוקב מדד').source),
     /מסלול עוקב מדד\s+(-?[0-9]+\.[0-9]+)%/,
+    // V2.9.9 — כלל (לאחר normalizeReversedPercentages): "1.34%   כלל השתלמות כללי"
+    new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל השתלמות').source),
+    new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל פנסיה').source),
+    new RegExp('(-?[0-9]+\\.[0-9]+)%\\s+' + hebrewRx('כלל גמל').source),
     // מיטב: "0.54%   -5.57%   מיטב השתלמות עוקב מדד S&P500"
     // Format: [cost%]  [return%]  [fund name]  S&P
     /[0-9.]+%\s+(-?[0-9]+\.[0-9]+)%\s+(?:[^\n]*?)S&P/i,
@@ -331,6 +335,28 @@ function extractReportDate(text) {
 //  TEXT EXTRACTION FROM PDF
 // ══════════════════════════════════════════════════════════════
 
+/**
+ * V2.9.9 — תיקון מספרים-באחוז הפוכים (RTL) בדוחות כלל
+ *   "% 4 3 . 1" → "1.34%"
+ *   "% 4 3 . 2 1" → "12.34%"
+ *   "ן % 2 5 . 0"  → "0.52%"
+ * הסיבה: pdfjs קורא תאי טבלה במצב RTL ישראלי בסדר ויזואלי, אז מספרים בתוך
+ * תא מימיני למילים עבריות יוצאים הפוכים. שאר ה-PDF-ים (מנורה, מיטב) לא סובלים
+ * מזה כי המספרים בתאים נפרדים מספיק.
+ */
+function normalizeReversedPercentages(text) {
+  return text.replace(
+    /%\s+((?:\d\s*){1,3})\.\s*((?:\d\s*){1,3})(?=\s|$)/g,
+    (match, decPartRaw, wholePartRaw) => {
+      const dec   = decPartRaw.replace(/\s+/g, '').split('').reverse().join('');
+      const whole = wholePartRaw.replace(/\s+/g, '').split('').reverse().join('');
+      // sanity: ערך סביר לתשואה/דמי-ניהול (0–99 שלמים, 0–99 עשרוני)
+      if (!whole || !dec) return match;
+      return `${whole}.${dec}%`;
+    }
+  );
+}
+
 async function extractTextFromPDF(arrayBuffer) {
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
   const maxPages = Math.min(pdf.numPages, 20);
@@ -345,6 +371,9 @@ async function extractTextFromPDF(arrayBuffer) {
     pageTexts.push(pageText);
     fullText += pageText + '\n';
   }
+
+  // V2.9.9 — נרמל מספרים הפוכים (RTL) לפני שאר העיבוד
+  fullText = normalizeReversedPercentages(fullText);
 
   return { fullText, pageTexts, numPages: pdf.numPages };
 }
