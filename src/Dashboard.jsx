@@ -3,7 +3,8 @@ import { parsePDF } from './lib/pdfParser';
 import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, saveSettings, deleteAsset,
          subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
          subscribeToSettings, subscribeToAlerts,
-         saveFundSnapshot, findExistingSnapshot, subscribeFundHistory } from './lib/firestoreService';
+         saveFundSnapshot, findExistingSnapshot, subscribeFundHistory,
+         subscribePriceHistory } from './lib/firestoreService';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -37,7 +38,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.7";
+const APP_VERSION = "V2.9.8";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -3349,16 +3350,16 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
 // V2.8.2: priceUnit:"ils"  → הסורק ממיר אגורות ל-₪ לפני שמירה ב-Firestore (tasePriceILS)
 //         priceUnit:"usd"  → IBIT, avgEntry מוזן בדולרים, P&L מוצג בדולרים
 const EXCELLENCE_LONG_TEMPLATE = [
-  { id:"sp500",   label:"S&P 500",   ticker:"SP500",  currency:"ILS", priceUnit:"ils", color:"#22c55e", liveKey:"SP500",  note:"תל-אביב 1183441 · הסורק שומר ב-₪ (tasePriceILS)" },
-  { id:"nasdaq",  label:"Nasdaq",    ticker:"NASDAQ", currency:"ILS", priceUnit:"ils", color:"#3b82f6", liveKey:"NASDAQ", note:"תל-אביב 1159243 · הסורק שומר ב-₪ (tasePriceILS)" },
-  { id:"bitcoin", label:"Bitcoin",   ticker:"IBIT",   currency:"USD", priceUnit:"usd", color:"#f59e0b", liveKey:"IBIT",   note:"iShares Bitcoin Trust ETF · avgEntry ב-$" },
+  { id:"sp500",   label:"S&P 500",   ticker:"SP500",  currency:"ILS", priceUnit:"ils", color:"#22c55e", liveKey:"SP500",  historyId:"sp500_tase",  note:"תל-אביב 1183441 · הסורק שומר ב-₪ (tasePriceILS)" },
+  { id:"nasdaq",  label:"Nasdaq",    ticker:"NASDAQ", currency:"ILS", priceUnit:"ils", color:"#3b82f6", liveKey:"NASDAQ", historyId:"nasdaq_tase", note:"תל-אביב 1159243 · הסורק שומר ב-₪ (tasePriceILS)" },
+  { id:"bitcoin", label:"Bitcoin",   ticker:"IBIT",   currency:"USD", priceUnit:"usd", color:"#f59e0b", liveKey:"IBIT",   historyId:"ibit",        note:"iShares Bitcoin Trust ETF · avgEntry ב-$" },
 ];
 
 /** Long-Term allocation (all zero by default — user will provide data later) */
 const DEFAULT_EXCELLENCE_LONG = EXCELLENCE_LONG_TEMPLATE.map(t => ({
   id: t.id,
   qty: 0,
-  avgEntry: 0,       // average cost per unit
+  avgEntry: 0,       // average cost per unit (שער עלות באקסלנס)
   investedILS: 0,    // total invested amount in ILS
 }));
 
@@ -3743,9 +3744,429 @@ const _FireTab_unused = ({ mstyAsset, mstyDividends, mstyPrice, fx, fireTarget, 
   );
 };
 
+// ══════════════════════════════════════════════════════════════
+//  V2.9.8 — Excellence Pro: Period Analytics Helpers
+// ══════════════════════════════════════════════════════════════
+
+/** מחזיר תאריך התחלה (ISO "YYYY-MM-DD") עבור תקופה נתונה */
+function periodStartDate(period) {
+  const now = new Date();
+  if (period === "1M") { const d = new Date(now); d.setDate(d.getDate() - 30);  return d.toISOString().slice(0,10); }
+  if (period === "YTD"){ return `${now.getFullYear()}-01-01`; }
+  if (period === "1Y") { const d = new Date(now); d.setFullYear(d.getFullYear() - 1); return d.toISOString().slice(0,10); }
+  if (period === "3Y") { const d = new Date(now); d.setFullYear(d.getFullYear() - 3); return d.toISOString().slice(0,10); }
+  if (period === "ALL") return null; // כל הברים הזמינים
+  return null;
+}
+
+/** סנן ברים לטווח [startDate, end] */
+function filterBars(bars, startDate) {
+  if (!Array.isArray(bars) || bars.length === 0) return [];
+  if (!startDate) return bars;
+  return bars.filter(b => b.d >= startDate);
+}
+
+/** ערך בר ב-ILS (לאחר עיגון למחיר חי + המרת מטבע) */
+function scaleAnchorBars(bars, livePriceILS) {
+  if (!Array.isArray(bars) || bars.length === 0) return [];
+  if (livePriceILS == null) return bars;
+  const last = bars[bars.length - 1].c;
+  if (!last || last <= 0) return bars;
+  const scale = livePriceILS / last;
+  return bars.map(b => ({ d: b.d, c: b.c * scale }));
+}
+
+/** המרת ברי USD ל-ILS דרך fxBars (lookup לפי תאריך, fallback לאחרון) */
+function usdBarsToILS(bars, fxBars) {
+  if (!Array.isArray(bars) || bars.length === 0) return [];
+  if (!Array.isArray(fxBars) || fxBars.length === 0) return bars;
+  const fxMap = new Map(fxBars.map(b => [b.d, b.c]));
+  const lastFx = fxBars[fxBars.length - 1].c;
+  return bars.map(b => ({ d: b.d, c: b.c * (fxMap.get(b.d) ?? lastFx) }));
+}
+
+const PERIOD_LABELS = { "1M": "חודש", "YTD": "מתחילת השנה", "1Y": "שנה", "3Y": "3 שנים", "ALL": "כל ההיסטוריה" };
+const PERIOD_KEYS = ["1M", "YTD", "1Y", "3Y", "ALL"];
+
+/**
+ * V2.9.8 — Excellence Period Analytics
+ * תצוגה מקצועית: צ'יפי תקופה, גרף תיק כולל, כרטיס אחזקה נבחרת עם תשואות תקופתיות + גרף פרטי
+ */
+const ExcellencePeriodAnalytics = ({
+  enriched, priceHistories, fxBars, fxRate,
+  totalInvested, totalMarket,
+  selectedPeriod, setSelectedPeriod,
+  selectedHoldingId, setSelectedHoldingId,
+  liveMarket,
+}) => {
+  // ── עיגון ברים לפי מחיר חי + המרה ל-ILS ──────────────────────────────
+  const scaledBarsById = useMemo(() => {
+    const map = {};
+    for (const h of enriched) {
+      const histKey = h.def.historyId;
+      const hist = priceHistories[histKey];
+      if (!hist?.bars) { map[h.id] = []; continue; }
+      let bars = hist.bars;
+      if (h.def.priceUnit === "usd") {
+        // IBIT: ברים ב-USD → המרה לכל תאריך ל-ILS דרך fxBars
+        bars = usdBarsToILS(bars, fxBars);
+        // ועיגון לפי המחיר החי ב-ILS (אם זמין)
+        if (h.priceILS != null && h.priceILS > 0) bars = scaleAnchorBars(bars, h.priceILS);
+      } else {
+        // TASE: ברים סינתטיים (idx × fx) → עיגון לפי המחיר החי הישראלי
+        if (h.priceILS != null && h.priceILS > 0) bars = scaleAnchorBars(bars, h.priceILS);
+      }
+      map[h.id] = bars;
+    }
+    return map;
+  }, [enriched, priceHistories, fxBars]);
+
+  // ── גרף תיק כולל: לכל תאריך, סכם qty*bar.c ב-ILS ──
+  const portfolioChartData = useMemo(() => {
+    const startDate = periodStartDate(selectedPeriod);
+    // איסוף כל הברים בטווח לכל אחזקה
+    const seriesByHolding = enriched.map(h => ({
+      h,
+      bars: filterBars(scaledBarsById[h.id] || [], startDate),
+    })).filter(s => s.bars.length > 0 && s.h.qty > 0);
+
+    if (seriesByHolding.length === 0) return [];
+
+    // יוצרים set מאוחד של תאריכים
+    const allDates = new Set();
+    seriesByHolding.forEach(s => s.bars.forEach(b => allDates.add(b.d)));
+    const sortedDates = [...allDates].sort();
+
+    // עבור כל תאריך, בנה ערך תיק = Σ (qty × bar.c של אותה אחזקה — fallback לבר אחרון לפני התאריך)
+    return sortedDates.map(d => {
+      let total = 0;
+      for (const { h, bars } of seriesByHolding) {
+        // מצא בר נכון לתאריך (אחרון <= d)
+        let bar = null;
+        for (let i = bars.length - 1; i >= 0; i--) {
+          if (bars[i].d <= d) { bar = bars[i]; break; }
+        }
+        if (bar && bar.c) total += h.qty * bar.c;
+      }
+      return { d, value: Math.round(total) };
+    });
+  }, [enriched, scaledBarsById, selectedPeriod]);
+
+  // ── האחזקה הנבחרת + הברים שלה לתקופה הנבחרת ──
+  const selectedHolding = enriched.find(h => h.id === selectedHoldingId);
+  const selectedDef = selectedHolding?.def;
+  const selectedBars = scaledBarsById[selectedHoldingId] || [];
+  const selectedLive = liveMarket?.[selectedDef?.liveKey];
+
+  const selectedChartData = useMemo(() => {
+    if (!selectedHolding || selectedHolding.qty === 0) return [];
+    const startDate = periodStartDate(selectedPeriod);
+    const bars = filterBars(selectedBars, startDate);
+    return bars.map(b => ({ d: b.d, value: Math.round(selectedHolding.qty * b.c) }));
+  }, [selectedHolding, selectedBars, selectedPeriod]);
+
+  // ── חישוב תשואות תקופתיות לאחזקה הנבחרת (מבוסס ברים) ──
+  const periodReturns = useMemo(() => {
+    if (!selectedHolding || selectedBars.length === 0) return {};
+    const last = selectedBars[selectedBars.length - 1];
+    const result = {};
+    for (const p of PERIOD_KEYS) {
+      if (p === "ALL") {
+        const start = selectedBars[0];
+        if (!start || !start.c) { result[p] = null; continue; }
+        result[p] = ((last.c / start.c) - 1) * 100;
+        continue;
+      }
+      const startDate = periodStartDate(p);
+      if (!startDate) { result[p] = null; continue; }
+      const start = selectedBars.find(b => b.d >= startDate);
+      if (!start || !start.c) { result[p] = null; continue; }
+      result[p] = ((last.c / start.c) - 1) * 100;
+    }
+    return result;
+  }, [selectedHolding, selectedBars]);
+
+  // ── חישובי שווי/עלות לתיק נבחר ──
+  const sCostBasis = selectedHolding?.invested || 0;
+  const sMarketValue = selectedHolding?.marketValueILS || 0;
+  const sPnL = sMarketValue - sCostBasis;
+  const sReturn = sCostBasis > 0 ? ((sMarketValue / sCostBasis) - 1) * 100 : 0;
+
+  // ── % מהתיק (חלקה של האחזקה הנבחרת מסך התיק) ──
+  const portfolioPct = totalMarket > 0 ? (sMarketValue / totalMarket) * 100 : 0;
+
+  // ── שער עלות / שער אחרון / שער בסיס (כמו באקסלנס) ──
+  // שער עלות = avgEntry · שער אחרון = priceILS · שער בסיס = שער של אתמול (priceILS / (1 + dailyChg%))
+  const sCurrentPrice = selectedHolding?.priceILS ?? null;
+  const dailyChgPct = selectedLive?.changePct ?? selectedLive?.dailyChangePct ?? null;
+  const sBasisPrice = (sCurrentPrice != null && dailyChgPct != null && dailyChgPct !== 0)
+    ? sCurrentPrice / (1 + dailyChgPct / 100)
+    : sCurrentPrice;
+  const sAvgEntryILS = selectedDef?.priceUnit === "usd"
+    ? (selectedHolding?.avgEntry || 0) * fxRate
+    : (selectedHolding?.avgEntry || 0);
+
+  // ── נתוני last updated ──
+  const lastUpdates = Object.values(priceHistories).map(p => p?.lastUpdate).filter(Boolean).sort();
+  const lastUpdateDisplay = lastUpdates.length > 0
+    ? new Date(lastUpdates[lastUpdates.length - 1]).toLocaleString("he-IL", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit" })
+    : "טוען...";
+
+  const fmtILS = (n) => `₪${Math.round(n).toLocaleString("he-IL")}`;
+  const portfolioPnL = totalMarket - totalInvested;
+  const portfolioTotalReturnPct = totalInvested > 0 ? ((totalMarket / totalInvested) - 1) * 100 : 0;
+  const colorBy = (n) => n > 0 ? "text-emerald-400" : n < 0 ? "text-rose-400" : "text-slate-400";
+
+  return (
+    <section className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <TrendingUp size={18} className="text-emerald-400"/>
+          <h2 className="text-lg font-bold text-slate-100">תיק אקסלנס · ניתוח מקצועי</h2>
+          <span className="text-[10px] bg-emerald-900/30 border border-emerald-700/40 text-emerald-300 px-2 py-0.5 rounded-full">V2.9.8</span>
+        </div>
+        <div className="text-[10px] text-slate-400">עודכן: <span className="font-mono">{lastUpdateDisplay}</span></div>
+      </div>
+
+      {/* Period Chips */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {PERIOD_KEYS.map(p => (
+          <button key={p} onClick={() => setSelectedPeriod(p)}
+            className={`text-[11px] px-3 py-1 rounded-lg border transition-colors ${
+              selectedPeriod === p
+                ? "bg-emerald-700/40 border-emerald-500/60 text-emerald-100 font-bold"
+                : "bg-slate-900/40 border-slate-700/60 text-slate-400 hover:text-slate-200"
+            }`}>
+            {PERIOD_LABELS[p]}
+          </button>
+        ))}
+      </div>
+
+      {/* Portfolio Chart */}
+      <div className="bg-slate-900/40 border border-slate-700/50 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-bold text-slate-100">גרף תיק כולל</h3>
+          <div className="text-[11px] text-slate-400">
+            <span className="font-mono text-slate-200 font-bold">{fmtILS(totalMarket)}</span>
+            <span className={`font-mono font-bold ml-2 ${colorBy(portfolioPnL)}`}>
+              {portfolioPnL >= 0 ? "+" : ""}{fmtILS(portfolioPnL)} ({portfolioTotalReturnPct >= 0 ? "+" : ""}{portfolioTotalReturnPct.toFixed(2)}%)
+            </span>
+          </div>
+        </div>
+        {portfolioChartData.length === 0 ? (
+          <div className="flex items-center justify-center h-48 text-slate-500 text-[12px] italic">
+            {totalInvested === 0 ? "הזן נתוני אחזקות כדי לראות גרף" : "ממתין לטעינת היסטוריית מחירים..."}
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart data={portfolioChartData} margin={{ top:5, right:5, left:0, bottom:5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b"/>
+              <XAxis dataKey="d" tick={{ fontSize:9, fill:"#64748b" }}
+                tickFormatter={d => d.slice(5)} minTickGap={40}/>
+              <YAxis tick={{ fontSize:9, fill:"#64748b" }}
+                tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} width={60}
+                domain={[dataMin => Math.max(0, dataMin * 0.95), dataMax => dataMax * 1.05]}/>
+              <Tooltip
+                formatter={v => [fmtILS(v), "שווי"]}
+                labelFormatter={d => `תאריך: ${d}`}
+                contentStyle={{ background:"#1e293b", border:"1px solid #334155", borderRadius:8, fontSize:11 }}/>
+              <Line type="monotone" dataKey="value" stroke="#22c55e" strokeWidth={2}
+                dot={false} activeDot={{ r:4, fill:"#22c55e" }}/>
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Holding Selector */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] text-slate-400">פרטי אחזקה:</span>
+        {enriched.map(h => (
+          <button key={h.id} onClick={() => setSelectedHoldingId(h.id)}
+            className={`text-[11px] px-3 py-1 rounded-lg border transition-colors flex items-center gap-1.5 ${
+              selectedHoldingId === h.id
+                ? "border-slate-400/80 text-slate-100 font-bold"
+                : "border-slate-700/60 text-slate-400 hover:text-slate-200"
+            }`}
+            style={selectedHoldingId === h.id ? { background: `${h.def.color}25` } : {}}>
+            <span className="w-2 h-2 rounded-full" style={{ background: h.def.color }}/>
+            {h.def.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Selected Holding Details — "כמו באקסלנס" */}
+      {selectedHolding && (
+        <div className="bg-slate-900/40 border border-slate-700/50 rounded-xl p-4 space-y-4">
+
+          {/* כותרת: שם הקרן + מס' נייר */}
+          <div className="flex items-start justify-between flex-wrap gap-3 pb-3 border-b border-slate-700/40">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full" style={{ background: selectedDef?.color }}/>
+                <h3 className="text-base font-bold text-slate-100">{selectedDef?.label}</h3>
+                {selectedDef?.id === "sp500"  && <span className="text-[11px] text-slate-500 font-mono">1183441 · Invesco S&P 500</span>}
+                {selectedDef?.id === "nasdaq" && <span className="text-[11px] text-slate-500 font-mono">1159243 · iShares NASDAQ 100</span>}
+                {selectedDef?.id === "bitcoin"&& <span className="text-[11px] text-slate-500 font-mono">IBIT · iShares Bitcoin Trust</span>}
+              </div>
+            </div>
+            <div className="text-left">
+              <div className="text-[10px] text-slate-400">שווי נוכחי</div>
+              <div className="font-mono text-slate-100 font-bold text-xl">{fmtILS(sMarketValue)}</div>
+              <div className={`text-[12px] font-mono font-bold ${colorBy(sPnL)}`}>
+                {sPnL >= 0 ? "+" : ""}{fmtILS(sPnL)} ({sReturn >= 0 ? "+" : ""}{sReturn.toFixed(2)}%)
+              </div>
+            </div>
+          </div>
+
+          {/* שדות "כמו באקסלנס" — שני טורים */}
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[12px]">
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">כמות</span>
+              <span className="font-mono text-slate-100 font-semibold">{selectedHolding.qty}</span>
+            </div>
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">מטבע</span>
+              <span className="font-mono text-slate-100 font-semibold">{selectedDef?.priceUnit === "usd" ? "USD" : "ILS"}</span>
+            </div>
+
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">שער אחרון</span>
+              <span className="font-mono text-slate-100 font-semibold">
+                {sCurrentPrice != null
+                  ? (selectedDef?.priceUnit === "usd" ? `$${selectedLive?.price?.toFixed(2)}` : `₪${sCurrentPrice.toLocaleString("he-IL", {maximumFractionDigits:2})}`)
+                  : "—"}
+              </span>
+            </div>
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">שער בסיס (אתמול)</span>
+              <span className="font-mono text-slate-100 font-semibold">
+                {sBasisPrice != null
+                  ? (selectedDef?.priceUnit === "usd" ? `$${(selectedLive?.price && dailyChgPct != null ? selectedLive.price / (1 + dailyChgPct/100) : 0).toFixed(2)}` : `₪${sBasisPrice.toLocaleString("he-IL", {maximumFractionDigits:2})}`)
+                  : "—"}
+              </span>
+            </div>
+
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">שער עלות</span>
+              <span className="font-mono text-slate-100 font-semibold">
+                {selectedHolding.avgEntry > 0
+                  ? (selectedDef?.priceUnit === "usd" ? `$${selectedHolding.avgEntry}` : `₪${Number(selectedHolding.avgEntry).toLocaleString("he-IL", {maximumFractionDigits:2})}`)
+                  : "—"}
+              </span>
+            </div>
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">% מהתיק</span>
+              <span className="font-mono text-slate-100 font-semibold">{portfolioPct.toFixed(2)}%</span>
+            </div>
+
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">שינוי מעלות (₪)</span>
+              <span className={`font-mono font-bold ${colorBy(sPnL)}`}>{sPnL >= 0 ? "+" : ""}{fmtILS(sPnL)}</span>
+            </div>
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">שינוי מעלות %</span>
+              <span className={`font-mono font-bold ${colorBy(sReturn)}`}>{sReturn >= 0 ? "+" : ""}{sReturn.toFixed(2)}%</span>
+            </div>
+
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">עלות כוללת</span>
+              <span className="font-mono text-slate-100 font-semibold">{fmtILS(sCostBasis)}</span>
+            </div>
+            <div className="flex justify-between border-b border-slate-700/30 pb-1">
+              <span className="text-slate-400">שווי אחזקה</span>
+              <span className="font-mono text-slate-100 font-semibold">{fmtILS(sMarketValue)}</span>
+            </div>
+          </div>
+
+          {/* תשואה מצטברת מיום ההשקעה — בולט */}
+          <div className="bg-gradient-to-l from-emerald-950/50 to-slate-800/40 border border-emerald-700/30 rounded-lg p-3 flex items-center justify-between">
+            <div>
+              <div className="text-[11px] text-emerald-300 font-semibold">תשואה מצטברת מיום ההשקעה</div>
+              <div className="text-[10px] text-slate-400">(שער אחרון לעומת שער עלות)</div>
+            </div>
+            <div className="text-left">
+              <div className={`font-mono font-black text-2xl ${colorBy(sReturn)}`}>
+                {sReturn >= 0 ? "+" : ""}{sReturn.toFixed(2)}%
+              </div>
+              <div className={`text-[11px] font-mono font-bold ${colorBy(sPnL)}`}>
+                {sPnL >= 0 ? "+" : ""}{fmtILS(sPnL)}
+              </div>
+            </div>
+          </div>
+
+          {/* תשואות תקופתיות */}
+          <div>
+            <div className="text-[11px] font-semibold text-slate-400 mb-2">תשואות תקופתיות (לפי היסטוריית מחירים)</div>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              {PERIOD_KEYS.map(p => {
+                const r = periodReturns[p];
+                return (
+                  <div key={p} className="bg-slate-800/50 border border-slate-700/50 rounded-lg p-2">
+                    <div className="text-[10px] text-slate-400">{PERIOD_LABELS[p]}</div>
+                    <div className={`font-mono font-bold text-sm ${r == null ? "text-slate-500" : colorBy(r)}`}>
+                      {r == null ? "—" : `${r >= 0 ? "+" : ""}${r.toFixed(2)}%`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* גרף לאחזקה הבודדת */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[12px] font-semibold text-slate-300">גרף שווי — {PERIOD_LABELS[selectedPeriod]}</h4>
+            </div>
+            {selectedChartData.length === 0 ? (
+              <div className="flex items-center justify-center h-40 text-slate-500 text-[12px] italic">
+                {selectedHolding.qty === 0 ? "הזן כמות יחידות כדי לראות גרף" : "אין נתונים בטווח הנבחר"}
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={180}>
+                <LineChart data={selectedChartData} margin={{ top:5, right:5, left:0, bottom:5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b"/>
+                  <XAxis dataKey="d" tick={{ fontSize:9, fill:"#64748b" }}
+                    tickFormatter={d => d.slice(5)} minTickGap={40}/>
+                  <YAxis tick={{ fontSize:9, fill:"#64748b" }}
+                    tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} width={60}
+                    domain={[dataMin => Math.max(0, dataMin * 0.95), dataMax => dataMax * 1.05]}/>
+                  <Tooltip formatter={v => [fmtILS(v), "שווי"]}
+                    labelFormatter={d => `תאריך: ${d}`}
+                    contentStyle={{ background:"#1e293b", border:"1px solid #334155", borderRadius:8, fontSize:11 }}/>
+                  <Line type="monotone" dataKey="value" stroke={selectedDef?.color} strokeWidth={2}
+                    dot={false} activeDot={{ r:4, fill: selectedDef?.color }}/>
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+};
+
 // V2.4.0 — ExcellenceTab: Total Equity · Doughnut · Line Chart · כרטיסי מידע מלאים
+
+// V2.9.8 — ExcellenceTab Pro: Period Analytics · Real Charts · Editable entryDate
 const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, liveMarket, fx }) => {
   const fxRate = fx || 3.6;
+
+  // ── V2.9.8: Price History subscriptions ─────────────────────────────────────
+  const [priceHistories, setPriceHistories] = useState({});  // {sp500_tase:{bars,...}, nasdaq_tase, ibit, fx_ils}
+  const [selectedPeriod, setSelectedPeriod] = useState("YTD");
+  const [selectedHoldingId, setSelectedHoldingId] = useState("sp500");
+
+  useEffect(() => {
+    const ids = ["sp500_tase", "nasdaq_tase", "ibit", "fx_ils"];
+    const unsubs = ids.map(id =>
+      subscribePriceHistory(id, data =>
+        setPriceHistories(prev => ({ ...prev, [id]: data }))
+      )
+    );
+    return () => unsubs.forEach(u => u && u());
+  }, []);
+
+  const fxBars = priceHistories.fx_ils?.bars || [];
 
   // ── V2.8.1: חישוב ערכים לכל אחזקה (תיקון אגורות + IBIT ב-USD + bad-fallback guard) ──
   const enriched = longTerm.map(h => {
@@ -3843,81 +4264,20 @@ const ExcellenceTab = ({ longTerm, setLongTerm, tradeJournal, setTradeJournal, l
         </div>
       </section>
 
-      {/* ══ גרפים ════════════════════════════════════════════════════════ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-        {/* Doughnut — התפלגות נכסים */}
-        <section className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <Target size={15} className="text-emerald-400"/>
-            <h3 className="text-sm font-bold text-slate-100">התפלגות נכסים</h3>
-            <span className="text-[10px] text-slate-500">S&amp;P · Nasdaq · Crypto</span>
-          </div>
-          {pieData.length > 0 ? (
-            <div className="flex items-center gap-4">
-              <ResponsiveContainer width={160} height={160}>
-                <PieChart>
-                  <Pie data={pieData} cx="50%" cy="50%" innerRadius={45} outerRadius={72}
-                    dataKey="value" paddingAngle={3}>
-                    {pieData.map((entry, i) => (
-                      <Cell key={i} fill={entry.color} stroke="rgba(15,23,42,0.6)" strokeWidth={2}/>
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(v) => [`₪${v.toLocaleString("he-IL")}`, ""]}
-                    contentStyle={{ background:"#1e293b", border:"1px solid #334155", borderRadius:8, fontSize:11 }}/>
-                </PieChart>
-              </ResponsiveContainer>
-              <div className="space-y-2 flex-1">
-                {pieData.map((d, i) => (
-                  <div key={i} className="flex items-center justify-between text-[11px]">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: d.color }}/>
-                      <span className="text-slate-300">{d.name}</span>
-                    </div>
-                    <div className="font-mono text-slate-200">
-                      {totalMarket > 0 ? ((d.value / totalMarket) * 100).toFixed(1) : 0}%
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center justify-center h-36 text-slate-500 text-[12px] italic">
-              הזן נתוני אחזקות כדי לראות את ההתפלגות
-            </div>
-          )}
-        </section>
-
-        {/* Line Chart — שווי תיק 30 יום */}
-        <section className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5">
-          <div className="flex items-center gap-2 mb-3">
-            <TrendingUp size={15} className="text-blue-400"/>
-            <h3 className="text-sm font-bold text-slate-100">התקדמות שווי התיק</h3>
-            <span className="text-[10px] text-slate-500 bg-amber-900/30 border border-amber-700/40 text-amber-400 px-1.5 py-0.5 rounded">
-              משוער — מיום הפעלה
-            </span>
-          </div>
-          {totalInvested > 0 ? (
-            <ResponsiveContainer width="100%" height={150}>
-              <LineChart data={lineData} margin={{ top:5, right:5, left:0, bottom:5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b"/>
-                <XAxis dataKey="day" tick={{ fontSize:9, fill:"#64748b" }}
-                  tickFormatter={(v, i) => (i === 0 || i === 14 || i === 29) ? v : ""} interval={0}/>
-                <YAxis tick={{ fontSize:9, fill:"#64748b" }}
-                  tickFormatter={v => `₪${(v/1000).toFixed(0)}K`} width={52}/>
-                <Tooltip formatter={v => [`₪${v.toLocaleString("he-IL")}`, "שווי"]}
-                  contentStyle={{ background:"#1e293b", border:"1px solid #334155", borderRadius:8, fontSize:11 }}/>
-                <Line type="monotone" dataKey="value" stroke="#22c55e" strokeWidth={2}
-                  dot={false} activeDot={{ r:4, fill:"#22c55e" }}/>
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-36 text-slate-500 text-[12px] italic">
-              הזן נתוני אחזקות כדי לראות את גרף ההתקדמות
-            </div>
-          )}
-        </section>
-      </div>
+      {/* ══ V2.9.8 — Excellence Pro Analytics ═══════════════════════════ */}
+      <ExcellencePeriodAnalytics
+        enriched={enriched}
+        priceHistories={priceHistories}
+        fxBars={fxBars}
+        fxRate={fxRate}
+        totalInvested={totalInvested}
+        totalMarket={totalMarket}
+        selectedPeriod={selectedPeriod}
+        setSelectedPeriod={setSelectedPeriod}
+        selectedHoldingId={selectedHoldingId}
+        setSelectedHoldingId={setSelectedHoldingId}
+        liveMarket={liveMarket}
+      />
 
       {/* ══ Excellence · Long Term — כרטיסי אחזקות ════════════════════ */}
       <section className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5">

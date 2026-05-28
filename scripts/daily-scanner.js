@@ -508,6 +508,114 @@ async function sendWeeklyWhatsApp(summary) {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  V2.9.8 — Excellence Price History (3y bars for charts)
+//  - TASE mutual funds (1183441, 1159243) → synthetic via underlying
+//    index × FX, then anchored to current real fund price
+//  - IBIT → direct from Yahoo (USD)
+//  - Bars stored at top-level: price_history/{tickerId}
+//    { ticker, currency, lastUpdate, bars: [{d:"YYYY-MM-DD", c:number}] }
+// ══════════════════════════════════════════════════════════════
+const EXCELLENCE_HISTORY = [
+  { id: "sp500_tase",  yahoo: "^GSPC", currency: "ILS", isTaseFund: true,  realKey: "sp500"  },
+  { id: "nasdaq_tase", yahoo: "^IXIC", currency: "ILS", isTaseFund: true,  realKey: "nasdaq" },
+  { id: "ibit",        yahoo: "IBIT",  currency: "USD", isTaseFund: false                    },
+  { id: "fx_ils",      yahoo: "ILS=X", currency: "FX",  isTaseFund: false                    },
+];
+
+async function yahooChartBars(symbol, range) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=1d`;
+  try {
+    const { status, body } = await httpsRequest(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      timeout: 15000,
+    });
+    if (status !== 200) return null;
+    const r = body?.chart?.result?.[0];
+    if (!r || !r.timestamp) return null;
+    const close = r.indicators?.quote?.[0]?.close || [];
+    return r.timestamp
+      .map((t, i) => ({ d: new Date(t * 1000).toISOString().slice(0, 10), c: close[i] }))
+      .filter(b => b.c != null);
+  } catch { return null; }
+}
+
+async function fetchExcellenceHistory(realPrices) {
+  console.log("\n📈 V2.9.8 — שולף היסטוריית מחירים לאקסלנס...");
+  let fxBars = null; // shared across TASE funds
+
+  for (const cfg of EXCELLENCE_HISTORY) {
+    try {
+      const existing = await fsRead("price_history", cfg.id);
+      const existingBars = Array.isArray(existing?.bars) ? existing.bars : [];
+      const isBackfill = existingBars.length === 0;
+      const range = isBackfill ? "3y" : "10d";
+
+      let bars = await yahooChartBars(cfg.yahoo, range);
+      if (!bars || bars.length === 0) {
+        console.warn(`  ⚠ ${cfg.id}: לא קיבל ברים מ-Yahoo (${cfg.yahoo})`);
+        continue;
+      }
+
+      if (cfg.isTaseFund) {
+        if (!fxBars) fxBars = await yahooChartBars("ILS=X", isBackfill ? "3y" : "10d");
+        if (!fxBars || fxBars.length === 0) {
+          console.warn(`  ⚠ ${cfg.id}: אין FX bars — מדלג`);
+          continue;
+        }
+        const fxMap = new Map(fxBars.map(b => [b.d, b.c]));
+        const lastFx = fxBars[fxBars.length - 1].c;
+        bars = bars.map(b => ({ d: b.d, c: b.c * (fxMap.get(b.d) ?? lastFx) }));
+
+        // Anchor synthetic series to current real fund price (so latest bar = real)
+        const realPrice = realPrices?.[cfg.realKey];
+        if (realPrice && bars.length > 0 && bars[bars.length - 1].c > 0) {
+          const scale = realPrice / bars[bars.length - 1].c;
+          bars = bars.map(b => ({ d: b.d, c: parseFloat((b.c * scale).toFixed(4)) }));
+          console.log(`  📐 ${cfg.id}: scale=${scale.toFixed(4)} → latest=₪${realPrice}`);
+        } else {
+          bars = bars.map(b => ({ d: b.d, c: parseFloat(b.c.toFixed(4)) }));
+          console.log(`  ℹ ${cfg.id}: ללא עיגון (אין מחיר אמיתי כיום)`);
+        }
+      } else {
+        bars = bars.map(b => ({ d: b.d, c: parseFloat(b.c.toFixed(4)) }));
+      }
+
+      // Merge: existing + new, dedupe by d, new bars override
+      let merged = bars;
+      if (existingBars.length > 0) {
+        if (cfg.isTaseFund) {
+          // TASE: scaling factor may have shifted slightly — full overwrite (keep
+          // historic shape consistent with latest anchor). For incremental runs,
+          // we only fetched last 10d, so preserve older bars but rescale them too.
+          // Simpler: if incremental, merge by date, scale older bars to new factor.
+          const map = new Map(existingBars.map(b => [b.d, b]));
+          for (const b of bars) map.set(b.d, b);
+          merged = [...map.values()].sort((a, b) => a.d.localeCompare(b.d));
+        } else {
+          const map = new Map(existingBars.map(b => [b.d, b]));
+          for (const b of bars) map.set(b.d, b);
+          merged = [...map.values()].sort((a, b) => a.d.localeCompare(b.d));
+        }
+      }
+
+      const added = merged.length - existingBars.length;
+      console.log(`  📈 ${cfg.id}: ${isBackfill ? 'backfill 3y' : 'incremental'} → +${added} ברים (סה"כ ${merged.length})`);
+
+      await fsWrite("price_history", cfg.id, {
+        ticker:     cfg.yahoo,
+        currency:   cfg.currency,
+        lastUpdate: NOW_ISO,
+        bars:       merged,
+      }, `price_history/${cfg.id}`);
+
+      await new Promise(r => setTimeout(r, 300)); // rate-limit Yahoo
+    } catch (e) {
+      console.warn(`  ⚠ ${cfg.id}: ${e.message}`);
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 //  Main
 // ══════════════════════════════════════════════════════════════
 (async () => {
@@ -765,6 +873,13 @@ async function sendWeeklyWhatsApp(summary) {
       sp500Price: sp500.price, nasdaqPrice: nasdaq.price,
     }, "scanner_status/latest"),
   ]);
+
+  // ══ שלב 8.5: V2.9.8 — היסטוריית מחירים לאקסלנס (3 שנים, גרפים) ══
+  try {
+    await fetchExcellenceHistory({ sp500: sp500.price, nasdaq: nasdaq.price });
+  } catch (e) {
+    console.warn("  ⚠ Excellence history נכשל:", e.message);
+  }
 
   // ══ שלב 9: V2.9.3 — סורק תעלות ════════════════════════════
   let channelAlerts = [];

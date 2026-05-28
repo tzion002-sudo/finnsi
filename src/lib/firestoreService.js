@@ -452,6 +452,28 @@ export function subscribeToAlerts(onData, onError) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  PRICE HISTORY  (V2.9.8 — 3y bars per ticker for Excellence charts)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Real-time listener for price_history/{tickerId}.
+ * tickerId ∈ { "sp500_tase", "nasdaq_tase", "ibit" }
+ * Data shape: { ticker, currency, lastUpdate, bars: [{d:"YYYY-MM-DD", c:number}] }
+ */
+export function subscribePriceHistory(tickerId, onData, onError) {
+  if (!isFirebaseReady()) { onData?.(null); return () => {}; }
+  const ref = doc(db, 'price_history', tickerId);
+  return onSnapshot(
+    ref,
+    snap => onData(snap.exists() ? snap.data() : null),
+    err => {
+      console.error(`subscribePriceHistory(${tickerId}):`, err);
+      if (onError) onError(err);
+    }
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  MARKET HISTORY  (V2.5.0 — daily price archive)
 // ════════════════════════════════════════════════════════════════════════════
 
