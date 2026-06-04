@@ -1,9 +1,10 @@
 name: On-Demand Price Fetch
 
+# V2.9.9 — נקרא מהאפליקציה כשהמשתמש לוחץ "עדכן מחירים"
+# GitHub API → workflow_dispatch → daily-scanner.js → Firestore
+# ⚠️ ללא secrets של Gmail/WhatsApp — לא נשלחים מיילים/הודעות בלחיצת on-demand
 on:
   workflow_dispatch:
-    # מופעל מהאפליקציה כשהמשתמש לוחץ "עדכן מחירים"
-    # GitHub API → workflow_dispatch → fetch-prices.js → Firestore
     inputs:
       source:
         description: 'מקור הטריגר (app / manual)'
@@ -13,7 +14,7 @@ on:
 jobs:
   fetch-prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -28,10 +29,13 @@ jobs:
       - name: Install dependencies
         run: npm ci --prefer-offline
 
-      - name: Fetch live prices → Firestore
-        run: node scripts/fetch-prices.js
+      - name: Run Scanner (On-Demand)
+        run: node scripts/daily-scanner.js
         env:
           NODE_ENV: production
+          # ☝️ במכוון לא מעבירים GMAIL_* או WHATSAPP_* כדי שלא יישלחו הודעות
+          #    בכל לחיצה על "עדכן מחירים". הסקנר היומי השלם (daily-scan.yml)
+          #    הוא היחיד ששולח את דוח הבוקר.
 
       - name: Done
-        run: echo "✅ Prices updated at $(TZ='Asia/Jerusalem' date '+%H:%M:%S') Israel time"
+        run: echo "✅ Prices updated at $(TZ='Asia/Jerusalem' date '+%H:%M:%S') Israel time (triggered by ${{ github.event.inputs.source }})"

@@ -38,7 +38,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.8";
+const APP_VERSION = "V2.9.9";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -2217,14 +2217,16 @@ const SCAN_LABELS = [
   "✨ מסכם ממצאים...",
 ];
 
-const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete }) => {
+const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete, onTriggerScan, ghTrigger }) => {
   const [scanning, setScanning]   = useState(false);
   const [progress, setProgress]   = useState(0);
   const [label, setLabel]         = useState("");
   const [toast, setToast]         = useState(null);
 
-  // V2.1.7 — NO FAKE DATA: קורא daily_scan.json שנוצר ע"י הסוכן המתוזמן
-  // אין jitter, אין Math.random(). אם ערך null — רושמים "לא נמצאו נתונים עדכניים"
+  // V2.9.9 — שינוי: מפעיל סריקה אמיתית דרך GitHub Actions (לא רק קורא Firestore)
+  // 1. dispatches workflow_dispatch ל-on-demand-prices.yml
+  // 2. ממתין ~60-90 שניות עד שהסקנר מסיים
+  // 3. קורא נתונים טריים מ-Firestore
   const runScan = () => {
     if (scanning) return;
     setScanning(true);
@@ -2233,15 +2235,21 @@ const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete }) =
     let tick = 0;
     let scanData = null;
 
-    // שלב 1: קריאת נתוני שוק — Firestore ראשון, fallback ל-daily_scan.json (V2.4.1)
+    // V2.9.9: מפעיל את הסריקה האמיתית — GitHub Actions ירוץ ויעדכן Firestore
+    if (typeof onTriggerScan === 'function') {
+      onTriggerScan().catch(e => console.warn('onTriggerScan failed:', e?.message));
+    }
+
+    // ממתין לתוצאות מ-Firestore (onSnapshot של LiveMarket יעדכן אוטומטית)
+    // הסריקה לוקחת בערך 60-90 שניות → 90 ticks × 1s = 90 שניות
     const fetchPromise = (async () => {
+      // המתן 75 שניות לפני קריאת הנתונים — כדי לתת לסריקה זמן לסיים
+      await new Promise(r => setTimeout(r, 75000));
       try {
-        // נסה Firestore תחילה (עובד ב-Netlify + נייד)
         const fsData = await getMarketData();
         if (fsData) { scanData = fsData; return; }
       } catch { /* Firestore לא זמין */ }
       try {
-        // Fallback: קובץ JSON מקומי (פיתוח בלבד)
         const res = await fetch("/daily_scan.json", { cache: "no-store" });
         if (res.ok) scanData = await res.json();
       } catch { /* קובץ לא קיים — ימשיך ב-null */ }
@@ -2321,7 +2329,7 @@ const SmartScanButton = ({ currentPrice, currentFX, onApply, onScanComplete }) =
           }, 300);
         });
       }
-    }, 80);
+    }, 1500);  // V2.9.9 — איטי יותר: 50 ticks × 1500ms = 75 שניות (תואם זמן סריקה אמיתי)
   };
 
   return (
@@ -5105,12 +5113,14 @@ export default function HaMatzpanGemelnet() {
             {uploading ? <><Activity size={14} className="animate-spin"/> מעבד...</> : <><Upload size={14}/> 📤 העלה דוח קופה</>}
           </button>
           <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls,.xlsm,.pdf,.txt" onChange={handleFileUpload} className="hidden"/>
-          {/* Smart Scan */}
+          {/* Smart Scan — V2.9.9: מפעיל סריקה אמיתית דרך GitHub Actions */}
           <SmartScanButton
             currentPrice={mstyPrice}
             currentFX={mstyFX}
             onApply={applyScanFindings}
             onScanComplete={setScanFindings}
+            onTriggerScan={refreshMarket}
+            ghTrigger={marketGhTrigger}
           />
           {/* Last scan time badge */}
           {lastScan && (
