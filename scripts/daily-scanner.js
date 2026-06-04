@@ -320,9 +320,15 @@ async function translateToHebrew(text) {
   try {
     const { status, body } = await httpsRequest(url, { timeout: 8000 });
     if (status === 200 && body?.responseData?.translatedText) {
-      const tr = body.responseData.translatedText.trim();
+      let tr = body.responseData.translatedText.trim();
       // MyMemory מחזיר את הטקסט המקורי אם לא הצליח לתרגם
-      if (tr && tr !== q && !tr.includes("MYMEMORY WARNING")) return tr;
+      if (tr && tr !== q && !tr.includes("MYMEMORY WARNING")) {
+        // V2.9.9: MyMemory לעיתים מחזיר תרגום עטוף ב-<p>...</p> או תגיות אחרות — נקה
+        tr = tr.replace(/<\/?[a-zA-Z][^>]*>/g, '')
+               .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+               .replace(/\s+/g, ' ').trim();
+        return tr || null;
+      }
     }
   } catch {}
   return null;

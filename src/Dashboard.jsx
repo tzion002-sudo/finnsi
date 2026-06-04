@@ -2710,7 +2710,9 @@ const MorningBriefModal = ({ brief, onApply, onDismiss, monthlyDivIncome }) => {
                 const label    = tickerLabelMap[n.ticker] || n.ticker || "news";
                 const srcLabel = n.sourceHe || n.source || "";
                 // V2.8.0: מה שמוצג = summaryHe (עברית) אם קיים, אחרת title אנגלי
-                const displayText = n.summaryHe || n.title;
+                // V2.9.9: ניקוי תגיות HTML שלעיתים MyMemory מחזיר (תאימות לאחור)
+                const cleanText = (s) => (s || '').replace(/<\/?[a-zA-Z][^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+                const displayText = cleanText(n.summaryHe || n.title);
                 return (
                   <li key={i} className={`text-[11px] border-r-2 ${borderColor} pr-2`}>
                     <div className="flex items-start gap-1.5">
