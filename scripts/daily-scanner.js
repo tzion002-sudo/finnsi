@@ -675,12 +675,14 @@ async function fetchExcellenceHistory(realPrices) {
   let nextDividend = null;
   let recentDividends = [];
   let mstyAnnouncements = [];
+  let dividendSourceUsed = null; // V3.0: "yieldmax" | "yahoo" | "firestore-cache"
 
   // מקור ראשוני: yieldmaxetfs.com
   const ymResult = await yieldmaxDividend();
   if (ymResult && ymResult.recent?.length > 0) {
     nextDividend   = { amount: ymResult.amount, exDate: ymResult.exDate, payDate: ymResult.payDate, status: ymResult.status, source: ymResult.source };
     recentDividends = ymResult.recent;
+    dividendSourceUsed = "yieldmax";
     mstyAnnouncements = ymResult.announcements || [];
     console.log(`  ✅ YieldMax: $${nextDividend.amount} · ex: ${nextDividend.exDate}`);
     console.log(`  📊 סה"כ ${recentDividends.length} דיבידנדים:`);
@@ -692,6 +694,7 @@ async function fetchExcellenceHistory(realPrices) {
     if (divResult) {
       nextDividend   = { amount: divResult.amount, exDate: divResult.exDate, payDate: divResult.payDate, status: divResult.status, source: divResult.source };
       recentDividends = divResult.recent || [];
+      dividendSourceUsed = "yahoo";
       console.log(`  ✅ Yahoo: $${nextDividend.amount} · ${recentDividends.length} דיבידנדים ב-6 חודשים`);
       recentDividends.slice(0, 8).forEach(d => console.log(`     • ${d.exDate} → $${d.amount}`));
     } else {
@@ -699,9 +702,54 @@ async function fetchExcellenceHistory(realPrices) {
       const prev = await fsRead("market_data", "latest");
       nextDividend   = prev?.msty?.nextDividend ?? { amount: null, exDate: null, payDate: null, status: "estimate" };
       recentDividends = prev?.msty?.recentDividends || [];
+      dividendSourceUsed = "firestore-cache";
       if (nextDividend?.amount) console.log(`  📋 fallback מ-Firestore: $${nextDividend.amount}`);
       else                       warnings.push("MSTY dividend: לא נמצא — בדוק yieldmaxetfs.com ידנית");
     }
+  }
+
+  // ══ שלב 3ב: V3.0 — דיבידנדים server-authoritative ══════════
+  // כותב את הרשימה המלאה ל-market_data/msty_dividends עם ולידציית-סבירות.
+  // ה-Dashboard מסנכרן ממנה אוטומטית (dividendSync.js) — ללא תלות בקליק.
+  if (dividendSourceUsed === "yieldmax" || dividendSourceUsed === "yahoo") {
+    console.log("\n🗂 V3.0 — כותב רשימת דיבידנדים מלאה (server-authoritative)...");
+    const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+    const maxFuture = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+    const validated = recentDividends.filter(d =>
+      d.amount > 0 && d.amount < 5 &&
+      typeof d.exDate === "string" && isoDate.test(d.exDate) &&
+      !isNaN(new Date(d.exDate).getTime()) &&
+      d.exDate <= maxFuture
+    ).map(d => ({
+      exDate:  d.exDate,
+      payDate: (typeof d.payDate === "string" && isoDate.test(d.payDate)) ? d.payDate : d.exDate,
+      amount:  d.amount,
+      status:  d.status || "confirmed",
+      source:  d.source || dividendSourceUsed,
+    }));
+    const dropped = recentDividends.length - validated.length;
+    if (dropped > 0) warnings.push(`msty_dividends: ${dropped} רשומות נפסלו בוולידציה (סכום/תאריך לא סביר)`);
+
+    // הגנת הצטמקות: אם הרשימה החדשה קטנה מ-50% מהקיימת — לא דורסים
+    const prevDoc = await fsRead("market_data", "msty_dividends");
+    const prevCount = Array.isArray(prevDoc?.dividends) ? prevDoc.dividends.length : 0;
+    if (validated.length === 0) {
+      warnings.push("msty_dividends: 0 רשומות תקינות — המסמך הקיים לא נדרס");
+      console.log("  ⚠ 0 דיבידנדים תקינים — מדלג על כתיבה");
+    } else if (prevCount > 0 && validated.length < prevCount * 0.5) {
+      warnings.push(`msty_dividends: הרשימה החדשה (${validated.length}) קטנה מ-50% מהקיימת (${prevCount}) — לא נכתבה, בדוק את המקור`);
+      console.log(`  ⚠ הצטמקות חשודה (${validated.length} מול ${prevCount}) — מדלג על כתיבה`);
+    } else {
+      await fsWrite("market_data", "msty_dividends", {
+        dividends:  validated,
+        count:      validated.length,
+        sourceUsed: dividendSourceUsed,
+        updatedAt:  NOW_ISO,
+        date:       TODAY,
+      }, "market_data/msty_dividends");
+    }
+  } else {
+    console.log("\n🗂 V3.0 — דיבידנדים מ-cache בלבד (מקורות חיים נכשלו) — מסמך msty_dividends לא מתעדכן");
   }
 
   // ══ שלב 4: V2.5.2 — דיבידנד חזוי (מספר מניות מ-Firestore) ══

@@ -4,7 +4,8 @@ import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, s
          subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
          subscribeToSettings, subscribeToAlerts,
          saveFundSnapshot, findExistingSnapshot, subscribeFundHistory,
-         subscribePriceHistory } from './lib/firestoreService';
+         subscribePriceHistory, subscribeToMstyDividends } from './lib/firestoreService';
+import { reconcileDividends } from './lib/dividendSync';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -38,7 +39,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V2.9.9";
+const APP_VERSION = "V3.0.0";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -1809,7 +1810,7 @@ function d_notes_for_month(items) {
   );
 }
 
-const MSTYTab = ({ msty, dividends, setDividends, fx, setFx, currentPrice, setCurrentPrice }) => {
+const MSTYTab = ({ msty, dividends, setDividends, fx, setFx, currentPrice, setCurrentPrice, onDeleteDividend }) => {
   const [newDivDate, setNewDivDate] = useState("");
   const [newDivAmount, setNewDivAmount] = useState("");
   const [taxRate, setTaxRate] = useState(msty?.taxRate ?? 0.25);
@@ -1924,7 +1925,12 @@ const MSTYTab = ({ msty, dividends, setDividends, fx, setFx, currentPrice, setCu
     }]);
     setNewDivDate(""); setNewDivAmount("");
   };
-  const deleteDiv = idx => setDividends(dividends.filter((_,i) => i !== idx));
+  // V3.0 — מחיקה ידנית רושמת tombstone כדי שהסנכרון האוטומטי לא יחזיר את הדיבידנד
+  const deleteDiv = idx => {
+    const d = dividends[idx];
+    if (d) onDeleteDividend?.(d);
+    setDividends(dividends.filter((_,i) => i !== idx));
+  };
   const toggleVerified = idx => setDividends(dividends.map((d,i) => i === idx ? { ...d, verified: !d.verified } : d));
   const updateAmount = (idx, val) => setDividends(dividends.map((d,i) => i === idx ? { ...d, amount: parseFloat(val) || 0 } : d));
   const confirmEstimate = idx => setDividends(dividends.map((d,i) => i === idx ? { ...d, status: "confirmed", verified: true, note: (d.note || "") + " · אושר ידנית" } : d));
@@ -4432,6 +4438,10 @@ export default function HaMatzpanGemelnet() {
   const [loans, setLoans]                 = useState(DEFAULT_LOANS);
   const [savings, setSavings]             = useState(DEFAULT_SAVINGS);
   const [mstyDividends, setMstyDividends] = useState(MSTY_DIVIDENDS_SEED);
+  // V3.0 — סנכרון דיבידנדים server-authoritative
+  const [serverDividends, setServerDividends]   = useState(null); // market_data/msty_dividends
+  const [deletedDividends, setDeletedDividends] = useState([]);   // tombstones — מחיקות ידניות
+  const [settingsReady, setSettingsReady]       = useState(false); // מונע reconcile מול SEED לפני hydration
   const [mstyFX, setMstyFX]               = useState(MSTY_DEFAULTS.currentFX);
   const [mstyPrice, setMstyPrice]         = useState(MSTY_DEFAULTS.currentPrice);
   const [lastScan, setLastScan]           = useState(null);
@@ -4557,6 +4567,7 @@ export default function HaMatzpanGemelnet() {
           if (Array.isArray(s.loans))                  setLoans(s.loans);
           if (Array.isArray(s.savings))                setSavings(s.savings);
           if (Array.isArray(s.mstyDividends))          setMstyDividends(s.mstyDividends);
+          if (Array.isArray(s.deletedDividends))       setDeletedDividends(s.deletedDividends);
           if (Array.isArray(s.documents))              setDocuments(s.documents);
           if (typeof s.mstyPrice === "number")         setMstyPrice(s.mstyPrice);
           if (typeof s.mstyFX === "number")            setMstyFX(s.mstyFX);
@@ -4565,6 +4576,7 @@ export default function HaMatzpanGemelnet() {
           if (typeof s.fireTarget === "number" && s.fireTarget > 0) setFireTarget(s.fireTarget);
           // מסמן hydrated רק כשיש נתונים אמיתיים
           settingsHydratedRef.current = true;
+          setSettingsReady(true); // V3.0 — משחרר את סנכרון הדיבידנדים
           // מבטל timer של משתמש חדש (אם רץ)
           if (newUserTimerRef.current) { clearTimeout(newUserTimerRef.current); newUserTimerRef.current = null; }
         } else {
@@ -4573,6 +4585,7 @@ export default function HaMatzpanGemelnet() {
           if (!settingsHydratedRef.current && !newUserTimerRef.current) {
             newUserTimerRef.current = setTimeout(() => {
               settingsHydratedRef.current = true;
+              setSettingsReady(true); // V3.0
               newUserTimerRef.current = null;
               // V2.7.2: שמור מיד את מצב ה-settings הנוכחי (כולל mstyPrice מהסריקה)
               if (currentSettingsRef.current) {
@@ -4586,6 +4599,7 @@ export default function HaMatzpanGemelnet() {
       (err) => {
         console.warn("subscribeToSettings failed:", err);
         settingsHydratedRef.current = true;
+        setSettingsReady(true); // V3.0
       }
     );
     return () => {
@@ -4602,6 +4616,40 @@ export default function HaMatzpanGemelnet() {
     return () => { try { unsub?.(); } catch {} };
   }, []);
 
+  // ═══ V3.0 · דיבידנדים server-authoritative — סנכרון אוטומטי ═══
+  // הסקנר כותב את הרשימה המלאה ל-market_data/msty_dividends;
+  // כאן מסנכרנים בשקט — בלי מודל, בלי קליק. מחיקות ידניות (tombstones) מנצחות.
+  useEffect(() => {
+    const unsub = subscribeToMstyDividends(data => setServerDividends(data));
+    return () => { try { unsub?.(); } catch {} };
+  }, []);
+
+  useEffect(() => {
+    if (!settingsReady) return; // אל תסנכרן מול ה-SEED לפני שנתוני ה-cloud נטענו
+    if (!Array.isArray(serverDividends?.dividends) || serverDividends.dividends.length === 0) return;
+    const { merged, added, changed } = reconcileDividends(
+      serverDividends.dividends, mstyDividends, deletedDividends);
+    if (!changed) return;
+    suppressSaveToastRef.current = true; // השינוי מגיע מסנכרון, לא מעריכה ידנית
+    cloudUpdateRef.current = false;      // הסנכרון הוא שינוי מקומי — חייב להישמר ל-Firestore
+                                         // (אחרת ה-debounce מדלג עליו כאילו הגיע מהענן והרשימה לא נשמרת)
+    setMstyDividends(merged);
+    if (added.length === 1) {
+      setSaveToast(`💰 דיבידנד חדש $${added[0].amount} (ex-date ${added[0].date}) — סנכרון אוטומטי`);
+    } else if (added.length > 1) {
+      setSaveToast(`💰 ${added.length} דיבידנדים נוספו — סנכרון אוטומטי`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsReady, serverDividends, mstyDividends, deletedDividends]);
+
+  // V3.0 — רישום tombstone במחיקה ידנית: הדיבידנד לא יסונכרן שוב לעולם
+  const addDividendTombstone = useCallback((d) => {
+    if (!d?.date) return;
+    setDeletedDividends(prev =>
+      prev.some(t => t.exDate === d.date) ? prev
+        : [...prev, { exDate: d.date, amount: d.amount ?? null, deletedAt: new Date().toISOString() }]);
+  }, []);
+
   // Debounced auto-save — V2.7.1 fixes:
   // 1. mstyPrice/mstyFX הוסרו מה-deps: הם מגיעים מה-live-market, לא מעריכת משתמש.
   //    שינויהם גרם ל-debounce לירות לפני שנתוני cloud נטענו (race condition → DEFAULT_LOANS נכתב).
@@ -4610,7 +4658,7 @@ export default function HaMatzpanGemelnet() {
   //    עם re-render מרובות מ-React 17 (שלא מבצע batch על async callbacks).
   // V2.7.2: עדכן ref תמיד לנתוני settings הנוכחיים (לשמירה מהטיימר של משתמש חדש)
   currentSettingsRef.current = {
-    loans, savings, mstyDividends, documents,
+    loans, savings, mstyDividends, deletedDividends, documents,
     mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget,
   };
 
@@ -4623,14 +4671,14 @@ export default function HaMatzpanGemelnet() {
     }
     const t = setTimeout(() => {
       saveSettings({
-        loans, savings, mstyDividends, documents,
+        loans, savings, mstyDividends, deletedDividends, documents,
         mstyPrice, mstyFX,      // payload כולל מחירים — אבל לא גורמים ל-trigger
         excellenceLongTerm, excellenceTradeJournal, fireTarget,
       }).catch(err => console.warn("auto-saveSettings failed:", err));
     }, 800); // הגדלנו ל-800ms כדי לתת זמן ל-cloud update להגיע
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loans, savings, mstyDividends, documents, excellenceLongTerm, excellenceTradeJournal, fireTarget]);
+  }, [loans, savings, mstyDividends, deletedDividends, documents, excellenceLongTerm, excellenceTradeJournal, fireTarget]);
 
   // V2.7.1 — שמירת mstyPrice/mstyFX בנפרד (לא חלק מה-debounce הראשי כדי למנוע race)
   // נשמרים רק כשמשתמש/סריקה מעדכנים (לא כשמגיע מ-cloud — cloudUpdateRef מגן)
@@ -4638,7 +4686,7 @@ export default function HaMatzpanGemelnet() {
     if (!settingsHydratedRef.current) return;
     if (cloudUpdateRef.current) return; // cloudUpdateRef יתאפס ב-timeout הראשי
     const t = setTimeout(() => {
-      saveSettings({ loans, savings, mstyDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget })
+      saveSettings({ loans, savings, mstyDividends, deletedDividends, documents, mstyPrice, mstyFX, excellenceLongTerm, excellenceTradeJournal, fireTarget })
         .catch(err => console.warn("price-save failed:", err));
     }, 800);
     return () => clearTimeout(t);
@@ -4671,7 +4719,7 @@ export default function HaMatzpanGemelnet() {
 
       // 1) Settings doc
       await withTimeout(saveSettings({
-        loans, savings, mstyDividends,
+        loans, savings, mstyDividends, deletedDividends,
         documents: safeDocs,
         mstyPrice, mstyFX,
         excellenceLongTerm, excellenceTradeJournal, fireTarget,
@@ -4828,7 +4876,7 @@ export default function HaMatzpanGemelnet() {
       app: "HaMatzpan",
       version: APP_VERSION,
       exportedAt: new Date().toISOString(),
-      data: { assets, loans, savings, mstyDividends, mstyPrice, mstyFX, lastScan },
+      data: { assets, loans, savings, mstyDividends, deletedDividends, mstyPrice, mstyFX, lastScan },
     };
     try {
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -4862,6 +4910,7 @@ export default function HaMatzpanGemelnet() {
         if (d.loans?.length)             { setLoans(d.loans); }
         if (d.savings?.length)           { setSavings(d.savings); }
         if (d.mstyDividends?.length)     { setMstyDividends(d.mstyDividends); }
+        if (d.deletedDividends?.length)  { setDeletedDividends(d.deletedDividends); }
         if (d.mstyPrice != null)         { setMstyPrice(d.mstyPrice); }
         if (d.mstyFX != null)            { setMstyFX(d.mstyFX); }
         if (d.lastScan != null)          { setLastScan(d.lastScan); }
@@ -4896,32 +4945,8 @@ export default function HaMatzpanGemelnet() {
         changes.push(`💱 שער USD/ILS עודכן ל-${findings.msty.newFX} (היה ${prev})`);
       }
     }
-    // 3) דיבידנד חדש — V2.8.0: רק newDividend (ולא recentDivs שגורמים כפילויות)
-    // recentDivs מטופל באופן אוטומטי ע"י Firestore backfill ב-handleData (subscribeToMarketData)
-    // כאן רק מוסיפים דיבידנד אחד — אם הוא חדש (exDate לא קיים בסטייט)
-    {
-      const splitDate = "2025-12-08";
-      const nd = findings?.msty?.newDividend;
-      if (nd?.date && nd?.amount != null) {
-        setMstyDividends(prev => {
-          // בדוק שהדיבידנד לא קיים כבר (לפי תאריך)
-          if (prev.some(x => x.date === nd.date)) return prev;
-          const status = nd.status === "confirmed" ? "confirmed"
-            : new Date(nd.date) > new Date() ? "estimate" : "confirmed";
-          const entry = {
-            date:       nd.date,
-            amount:     nd.amount,
-            verified:   status === "confirmed",
-            status,
-            shareBasis: new Date(nd.date) < new Date(splitDate) ? "pre" : "post",
-            source:     "smart_scan",
-            note:       status === "estimate" ? "צפי — מסריקה (לא ייכלל ב-ROI עד אישור)" : "נוסף מסריקה ידנית",
-          };
-          changes.push(`💰 דיבידנד חדש $${nd.amount} (ex-date ${nd.date})`);
-          return [...prev, entry];
-        });
-      }
-    }
+    // 3) דיבידנדים — V3.0: מסונכרנים אוטומטית מ-market_data/msty_dividends
+    // (reconcileDividends ב-useEffect ייעודי) — אין תלות בקליק "החל" במודל הבוקר.
     // 4) עדכון תשואת פנסיה מנורה (נכס id:"1" של ציון) — V2.1.7: מדלג אם _manualLock פעיל
     if (findings?.menora?.newYtd != null) {
       setAssets(prev => prev.map(a => {
@@ -5366,6 +5391,7 @@ export default function HaMatzpanGemelnet() {
                                   setFx={setMstyFX}
                                   currentPrice={mstyPrice}
                                   setCurrentPrice={setMstyPrice}
+                                  onDeleteDividend={addDividendTombstone}
                                 />}
       {tab === "loans"       && <LoansTab loans={loans} setLoans={setLoans}/>}
       {tab === "savings"     && <SavingsTab savings={savings} setSavings={setSavings}/>}

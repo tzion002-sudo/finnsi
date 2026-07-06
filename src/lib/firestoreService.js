@@ -314,6 +314,26 @@ export function subscribeToMarketData(onData, onError) {
 }
 
 /**
+ * V3.0 — Real-time listener for market_data/msty_dividends (server-authoritative
+ * full dividend list written by the Node scanner with plausibility validation).
+ * Data shape: { dividends: [{exDate, payDate, amount, status, source}], count, sourceUsed, updatedAt }
+ * Returns an unsubscribe function.
+ */
+export function subscribeToMstyDividends(onData, onError) {
+  if (!isFirebaseReady()) return () => {};
+  return onSnapshot(
+    doc(db, 'market_data', 'msty_dividends'),
+    snap => {
+      if (snap.exists()) onData(snap.data());
+    },
+    err => {
+      console.error('subscribeToMstyDividends:', err);
+      if (onError) onError(err);
+    }
+  );
+}
+
+/**
  * One-time fetch of market_data/latest.
  * Returns the data object or null.
  */

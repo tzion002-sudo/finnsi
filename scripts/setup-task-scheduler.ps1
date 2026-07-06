@@ -1,9 +1,18 @@
 # setup-task-scheduler.ps1
+# ⛔ DEPRECATED (V3.0, 2026-07-06) — do NOT use.
+# The daily scan runs in GitHub Actions (.github/workflows/daily-scan.yml)
+# which is the single source of truth. A local scheduled task creates
+# competing double-writes to Firestore and silent-failure risk
+# (this script was broken for 2 months due to Hebrew-path encoding).
+# To remove an existing task, run as Administrator:
+#   Unregister-ScheduledTask -TaskName "HaMatzpan-MorningScan" -Confirm:$false
+#
 # Configures HaMatzpan daily scanner in Windows Task Scheduler
 # Run once as Administrator
 
 $TaskName   = "HaMatzpan-MorningScan"
-$ScriptPath = "D:\פרויקט עוזר פיננסי\scripts\daily-scanner.js"
+$ProjectDir = Split-Path -Parent $PSScriptRoot
+$ScriptPath = Join-Path $PSScriptRoot "daily-scanner.js"
 $NodeCmd    = Get-Command node -ErrorAction SilentlyContinue
 if (-not $NodeCmd) {
     Write-Error "Node.js not found! Install from https://nodejs.org and try again."
@@ -21,7 +30,7 @@ Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Silent
 $Action = New-ScheduledTaskAction `
     -Execute $NodePath `
     -Argument "`"$ScriptPath`"" `
-    -WorkingDirectory "D:\פרויקט עוזר פיננסי"
+    -WorkingDirectory $ProjectDir
 
 # Trigger: every day at 08:00
 $Trigger = New-ScheduledTaskTrigger -Daily -At "08:00"

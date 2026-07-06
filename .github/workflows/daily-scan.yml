@@ -2,8 +2,9 @@ name: Daily Market Scan
 
 on:
   schedule:
-    # ב-05:00 UTC = 08:00 ישראל (קיץ UTC+3) — ימי חול בלבד
-    - cron: '0 5 * * 1-5'
+    # ב-05:00 UTC = 08:00 ישראל (קיץ UTC+3) — ראשון עד שישי
+    # ראשון: TASE נסחרת (אקסלנס) · שישי: דיבידנד MSTY שהוכרז חמישי
+    - cron: '0 5 * * 0-5'
   workflow_dispatch:
     # מאפשר הרצה ידנית מ-GitHub Actions בלחיצת כפתור
 
@@ -39,6 +40,15 @@ jobs:
           GMAIL_FROM:         tzion002@gmail.com
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_TO:           ${{ secrets.GMAIL_TO }}
+
+      - name: Notify failure by email
+        if: failure()
+        run: node scripts/notify-failure.js
+        env:
+          GMAIL_FROM:         tzion002@gmail.com
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_TO:           ${{ secrets.GMAIL_TO }}
+          RUN_URL:            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Report scan result
         if: always()
