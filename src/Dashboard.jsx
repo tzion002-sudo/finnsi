@@ -556,11 +556,24 @@ function interpolateSeries(series) {
 }
 
 // ── רמזור ──
-function confidence(checkDate) {
-  const days = daysBetween(checkDate, new Date());
-  if (days <= 30) return { color:"#10b981", label:"עדכני", days };
-  if (days <= 90) return { color:"#f59e0b", label:"חלקי", days };
-  return            { color:"#ef4444", label:"ישן", days };
+// V3.0.3: מודע לאומדן גמל-נט — "עד כמה אנחנו מעודכנים על הקופה הזו" צריך לשקף
+// את המאוחר מבין: תאריך הדוח הרשמי (checkDate) לעומת חודש האומדן האחרון
+// (estimateThroughYm). האומדן עצמו (הסכום) לא נוגע כאן — רק טריות המידע.
+function confidence(checkDate, estimateThroughYm) {
+  let effectiveDate = checkDate;
+  let fromEstimate = false;
+  if (estimateThroughYm) {
+    // סוף החודש שהאומדן מכסה, לצורך השוואת תאריכים
+    const estimateEndDate = new Date(`${estimateThroughYm}-01T00:00:00`);
+    estimateEndDate.setMonth(estimateEndDate.getMonth() + 1);
+    estimateEndDate.setDate(0);
+    const estimateEnd = estimateEndDate.toISOString().slice(0, 10);
+    if (!checkDate || estimateEnd > checkDate) { effectiveDate = estimateEnd; fromEstimate = true; }
+  }
+  const days = daysBetween(effectiveDate, new Date());
+  if (days <= 30) return { color:"#10b981", label:"עדכני", days, fromEstimate };
+  if (days <= 90) return { color:"#f59e0b", label:"חלקי", days, fromEstimate };
+  return            { color:"#ef4444", label:"ישן", days, fromEstimate };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -575,15 +588,18 @@ const StatCard = ({ label, value, sub, color = "text-emerald-400", icon }) => (
   </div>
 );
 
-const ConfidenceDot = ({ checkDate }) => {
-  const c = confidence(checkDate);
+const ConfidenceDot = ({ checkDate, estimateThroughYm }) => {
+  const c = confidence(checkDate, estimateThroughYm);
+  const title = c.fromEstimate
+    ? `${c.label} · מבוסס אומדן גמל-נט עד ${estimateThroughYm} (הדוח הרשמי מ-${fmtDate(checkDate)})`
+    : `${c.label} · עודכן לפני ${c.days} ימים`;
   return (
-    <span title={`${c.label} · עודכן לפני ${c.days} ימים`} className="inline-flex items-center gap-1.5">
+    <span title={title} className="inline-flex items-center gap-1.5">
       <span className="relative flex h-2.5 w-2.5">
         <span className="animate-pulse absolute inline-flex h-full w-full rounded-full opacity-60" style={{background:c.color}}/>
         <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{background:c.color}}/>
       </span>
-      <span className="text-[11px] text-slate-400">{c.label}</span>
+      <span className="text-[11px] text-slate-400">{c.label}{c.fromEstimate && "·🔮"}</span>
     </span>
   );
 };
@@ -629,7 +645,7 @@ const AssetRow = ({ a, onSpotCheck, fundReturns }) => {
                 🔒 ננעל ידנית
               </span>
             )}
-            <ConfidenceDot checkDate={a.checkDate}/>
+            <ConfidenceDot checkDate={a.checkDate} estimateThroughYm={estimate?.throughYm}/>
           </div>
           <h3 className="font-semibold text-slate-100 text-sm truncate">{a.type}</h3>
           <p className="text-xs text-slate-400">{a.institution} {a.accountNumber ? `· ${a.accountNumber}` : ""}</p>
