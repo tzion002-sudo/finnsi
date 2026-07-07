@@ -379,30 +379,35 @@ function toFsDoc(obj) {
   return { fields };
 }
 
+/** מפענח שדה בודד בפורמט Firestore REST (fields/{...}) */
+function fsDecodeValue(v) {
+  if (v.nullValue    !== undefined) return null;
+  if (v.booleanValue !== undefined) return v.booleanValue;
+  if (v.integerValue !== undefined) return Number(v.integerValue);
+  if (v.doubleValue  !== undefined) return v.doubleValue;
+  if (v.stringValue  !== undefined) return v.stringValue;
+  if (v.arrayValue)  return (v.arrayValue.values || []).map(fsDecodeValue);
+  if (v.mapValue) {
+    const r = {};
+    for (const [k, fv] of Object.entries(v.mapValue.fields || {})) r[k] = fsDecodeValue(fv);
+    return r;
+  }
+  return null;
+}
+
+/** מפענח מסמך Firestore שלם (body.fields) לאובייקט JS פשוט */
+function fsDecodeDoc(body) {
+  const r = {};
+  for (const [k, v] of Object.entries(body.fields || {})) r[k] = fsDecodeValue(v);
+  return r;
+}
+
 /** קריאת מסמך יחיד מ-Firestore */
 async function fsRead(collectionPath, docId) {
   const url = `${FIRESTORE_BASE}/${collectionPath}/${docId}?key=${FIREBASE.apiKey}`;
   try {
     const { status, body } = await httpsRequest(url);
-    if (status === 200 && body?.fields) {
-      const decode = (v) => {
-        if (v.nullValue    !== undefined) return null;
-        if (v.booleanValue !== undefined) return v.booleanValue;
-        if (v.integerValue !== undefined) return Number(v.integerValue);
-        if (v.doubleValue  !== undefined) return v.doubleValue;
-        if (v.stringValue  !== undefined) return v.stringValue;
-        if (v.arrayValue)  return (v.arrayValue.values || []).map(decode);
-        if (v.mapValue) {
-          const r = {};
-          for (const [k, fv] of Object.entries(v.mapValue.fields || {})) r[k] = decode(fv);
-          return r;
-        }
-        return null;
-      };
-      const r = {};
-      for (const [k, v] of Object.entries(body.fields)) r[k] = decode(v);
-      return r;
-    }
+    if (status === 200 && body?.fields) return fsDecodeDoc(body);
   } catch {}
   return null;
 }
@@ -669,6 +674,29 @@ async function fetchExcellenceHistory(realPrices) {
   if (!fx.price)         warnings.push("USD/ILS: לא זמין");
   if (!rawSp500.price)   warnings.push("נייר 1183441 (S&P500 אקסלנס): חסום — יוצג מחיר יום קודם");
   if (!rawNasdaq.price)  warnings.push("נייר 1159243 (נאסד\"ק אקסלנס): חסום — יוצג מחיר יום קודם");
+
+  // ══ שלב 2.5: V3.0 — תזכורת דוחות קופות ישנים (>100 יום) ══════
+  // רץ פעם בשבוע (יום שני) כדי לא להציף את הבאנר/מייל כל בוקר עם אותה תזכורת
+  // הערה: כללי האבטחה של Firestore מאפשרים get() לפי מזהה אך חוסמים list() על
+  // האוסף — לכן קוראים כל נכס בנפרד לפי המזהים הידועים מה-SEED (Dashboard.jsx).
+  if (IS_MONDAY) {
+    try {
+      const ASSET_IDS = ["1","2","3","4","5","6","7","7b","8","9","10","12","13"];
+      const fetched = await Promise.all(ASSET_IDS.map(id => fsRead("families/mizrahi/assets", id)));
+      const assetsList = fetched.filter(Boolean);
+      const now = Date.now();
+      const staleFunds = assetsList.filter(a => {
+        if (!a.checkDate || a.isMSTY) return false;
+        const days = (now - new Date(a.checkDate).getTime()) / 86400000;
+        return days > 100;
+      });
+      staleFunds.forEach(a => {
+        const days = Math.round((now - new Date(a.checkDate).getTime()) / 86400000);
+        warnings.push(`📋 ${a.owner} · ${a.type}: דוח אחרון לפני ${days} יום (${a.checkDate}) — כדאי להעלות דוח מעודכן`);
+      });
+      if (staleFunds.length) console.log(`  📋 ${staleFunds.length} קופות עם דוח ישן מ-100 יום`);
+    } catch (e) { console.warn("  ⚠ בדיקת דוחות ישנים נכשלה:", e.message); }
+  }
 
   // ══ שלב 3: דיבידנד MSTY (V2.7.0: yieldmaxetfs.com ראשוני, Yahoo fallback) ══
   console.log("\n📅 שולף דיבידנדי MSTY מ-yieldmaxetfs.com (מקור ראשוני)...");
@@ -988,6 +1016,7 @@ async function fetchExcellenceHistory(realPrices) {
     news:            allNews,
     prevEmailedUrls,
     channelAlerts,   // V2.9.3: סורק תעלות
+    staleFundWarnings: warnings.filter(w => w.startsWith("📋")), // V3.0: תזכורת דוחות ישנים
   });
 
   // V2.9.6: שמור את האיחוד המצטבר של כל מה שנשלח (URLs + מפתחות כותרת)
@@ -1243,7 +1272,7 @@ async function runChannelScan() {
 // עובד אוטונומית מ-GitHub Actions ללא Claude
 async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstrChange,
   nextDiv, projectedILS, shares, sp500Price, nasdaqPrice, news, prevEmailedUrls = [],
-  channelAlerts = [] }) {
+  channelAlerts = [], staleFundWarnings = [] }) {
   if (!GMAIL_APP_PASSWORD || !GMAIL_TO) {
     console.log("  ⏭ Gmail: GMAIL_APP_PASSWORD/GMAIL_TO לא מוגדרים — מדלג");
     return null;
@@ -1333,6 +1362,13 @@ async function sendMorningEmail({ mstyPrice, mstrPrice, usdIls, mstyChange, mstr
   ${newsHtml ? `<div class="card">
     <div style="color:#a78bfa;font-weight:bold;margin-bottom:8px">📰 חדשות שוק</div>
     <ul>${newsHtml}</ul>
+  </div>` : ""}
+
+  ${staleFundWarnings.length > 0 ? `<div class="card">
+    <div style="color:#fbbf24;font-weight:bold;margin-bottom:8px">📋 תזכורת — דוחות קופה ישנים (100+ יום)</div>
+    <ul style="margin:0;padding-right:18px">
+      ${staleFundWarnings.map(w => `<li style="color:#fde68a;margin-bottom:4px">${w.replace(/^📋\s*/, "")}</li>`).join("")}
+    </ul>
   </div>` : ""}
 
   <div class="card">

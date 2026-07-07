@@ -2894,6 +2894,9 @@ function useLiveMarket() {
   const [source, setSource]       = useState("idle"); // 'firestore' | 'yahoo' | 'mixed' | 'idle'
   // V2.9.6: on-demand GitHub Actions trigger state
   const [ghTrigger, setGhTrigger] = useState("idle"); // 'idle'|'triggering'|'pending'|'error'
+  // V3.0 — שכבת אמינות: תאריך הסריקה (לבאנר staleness) + אזהרות הסקנר (להצפה ב-UI)
+  const [scanDate, setScanDate]         = useState(null);
+  const [scanWarnings, setScanWarnings] = useState([]);
   const yahooFreshUntilRef = useRef(0);
 
   // ── מיפוי מ-market_data/latest ל-mapping של LIVE_TRACKS ──
@@ -2941,6 +2944,9 @@ function useLiveMarket() {
       if (md.updatedBy === "on-demand") {
         setGhTrigger(prev => prev === "pending" ? "idle" : prev);
       }
+      // V3.0 — שכבת אמינות
+      if (md.date) setScanDate(md.date);
+      setScanWarnings(Array.isArray(md.warnings) ? md.warnings : []);
     });
     return () => { try { unsub?.(); } catch {} };
   }, [fromFirestore]);
@@ -2983,7 +2989,21 @@ function useLiveMarket() {
     }
   }, [ghTrigger]);
 
-  return { prices, fetchedAt, fetching: ghTrigger !== "idle", ghTrigger, source, refresh: triggerOnDemandScan };
+  return { prices, fetchedAt, fetching: ghTrigger !== "idle", ghTrigger, source, refresh: triggerOnDemandScan, scanDate, scanWarnings };
+}
+
+/**
+ * V3.0 — חישוב "האם הסריקה ישנה מדי" מודע ימי מסחר.
+ * ה-cron רץ א'-ו' (לא שבת). לכן פער מותר: 2 ימים בראשון (לכסות את השבת), אחרת יום אחד.
+ */
+function computeScanStaleness(scanDateStr) {
+  if (!scanDateStr) return { stale: false, daysOld: null }; // אין עדיין נתון — לא באנר, לא ידוע
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const last = new Date(scanDateStr + "T00:00:00");
+  if (isNaN(last.getTime())) return { stale: false, daysOld: null };
+  const daysOld = Math.round((today - last) / 86400000);
+  const maxAllowed = today.getDay() === 0 ? 2 : 1; // ראשון: מכסה את פער השבת
+  return { stale: daysOld > maxAllowed, daysOld };
 }
 
 /** LiveMarketBar — רצועת מחירים בזמן אמת בראש הדשבורד
@@ -4475,7 +4495,9 @@ export default function HaMatzpanGemelnet() {
   const suppressSaveToastRef = useRef(false);
 
   // V2.1.9 — Live Market Prices hook (IBIT, MSTY, SP500, Nasdaq, FX)
-  const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, ghTrigger: marketGhTrigger, refresh: refreshMarket } = useLiveMarket();
+  const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, ghTrigger: marketGhTrigger, refresh: refreshMarket, scanDate, scanWarnings } = useLiveMarket();
+  // V3.0 — שכבת אמינות: dead-man's switch עצמאי מ-GitHub Actions (מבוסס תאריך הנתונים בפועל)
+  const scanStaleness = useMemo(() => computeScanStaleness(scanDate), [scanDate]);
 
   // V2.1.9 — עדכון אוטומטי של מחיר MSTY + שער USD/ILS מ-LiveMarket (אם אין _manualLock)
   // V2.5.2 — Firestore-Only: עדכון מחיר MSTY + FX ב-state בלבד (ללא lsSave)
@@ -5163,6 +5185,26 @@ export default function HaMatzpanGemelnet() {
           </a>
         </div>
       </header>
+
+      {/* V3.0 — STALENESS BANNER (dead-man's switch): הסקנר לא רץ בזמן הצפוי */}
+      {scanStaleness.stale && (
+        <div className="bg-red-900/40 border-2 border-red-600/60 rounded-xl p-3 mb-4 flex items-center gap-3">
+          <AlertCircle size={20} className="text-red-400 flex-shrink-0"/>
+          <p className="text-red-200 text-sm font-semibold">
+            ⚠ הסקנר לא רץ {scanStaleness.daysOld} ימים — הנתונים אינם עדכניים (עדכון אחרון: {scanDate})
+          </p>
+        </div>
+      )}
+
+      {/* V3.0 — הצפת אזהרות הסקנר (יעדי fetch שנכשלו, ולידציות שנפסלו וכו') */}
+      {scanWarnings.length > 0 && (
+        <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-3 mb-4">
+          <p className="text-amber-300 text-xs font-semibold mb-1">⚠ אזהרות מהסריקה האחרונה ({scanDate}):</p>
+          <ul className="text-amber-200/80 text-xs list-disc list-inside space-y-0.5">
+            {scanWarnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
 
       {/* ERROR BANNER */}
       {uploadError && (
