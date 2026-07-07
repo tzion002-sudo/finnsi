@@ -72,9 +72,14 @@ function httpsRequest(url, options = {}, body = null) {
   });
 }
 
-// ── TASE (Israeli ETF) price — V2.8.3: 4 מקורות במדרג עדיפות ─────────────────
+// ── TASE (Israeli ETF) price — V3.0.3: 5 מקורות במדרג עדיפות ─────────────────
 // מחזיר מחיר ב-ILS (שקלים) — הסורק ממיר אגורות לפני שמירה ב-Firestore
-// מקורות: 1) Yahoo .TA  2) investing.com (HTML scrape, אגורות)  3) Stooq.com  4) Bizportal API
+// מקורות: 0) TASE Official API (חדש, 07/2026)  1) Yahoo .TA  2) investing.com  3) Stooq.com  4) Bizportal API
+//
+// V3.0.3 — ROOT CAUSE FIX: Yahoo .TA (404, delisted), Investing.com (403 Cloudflare),
+// Stooq (אין כיסוי ת"א), Bizportal (SSL 526, השרת מושבת) — כל 4 המקורות הישנים מתים
+// בו-זמנית. אותר מקור רשמי חי: api.tase.co.il (לא tase.co.il הראשי — זה מוגן Incapsula).
+// דורש Referer מ-tase.co.il אחרת 404 (אימות ידני 07/2026). BaseRate/LastRate באגורות.
 //
 // investing.com instrument IDs (נבדק ומוודא):
 //   1183441 (S&P 500)  → id=1185483, url=/etfs/s---p-500-source?cid=1185483
@@ -86,6 +91,21 @@ const INVESTING_COM_URLS = {
 
 async function tasePriceILS(shareId, yahooTicker) {
   const id = String(shareId);
+
+  // ── מקור 0: TASE Official API — company/securitydata (₪ באגורות) ─────
+  try {
+    const url = `https://api.tase.co.il/api/company/securitydata?securityId=${id}&lang=0`;
+    const { status, body } = await httpsRequest(url, {
+      timeout: 10000,
+      headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://www.tase.co.il/" },
+    });
+    const raw = body?.LastRate ?? body?.BaseRate;
+    if (status === 200 && raw != null && raw > 100) { // אגורות (>100)
+      const cur = parseFloat((raw / 100).toFixed(4));
+      console.log(`    ✅ TASE API: ${id} = ₪${cur} (${raw} אגורות · ${body?.TradeDate || ""})`);
+      return { price: cur, changePct: null, source: "TASE Official API", isFallback: false };
+    }
+  } catch (e) { console.log(`    ⚠ TASE API ${id}: ${e.message}`); }
 
   // ── מקור 1: Yahoo Finance .TA (מחיר ב-אגורות → ÷100 = ₪) ──────────
   try {
