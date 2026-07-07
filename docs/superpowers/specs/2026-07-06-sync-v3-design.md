@@ -114,4 +114,13 @@ GET https://gemelnet.cma.gov.il/tsuot/ui/tsuotHodXML.aspx
 
 - `vite.config.js`: הוסר `optimizeDeps.noDiscovery` (מהקומיט הראשוני) — גרם למסך לבן ב-dev
   אחרי כל שינוי lockfile (מודולי CJS של recharts לא עברו pre-bundle)
-- מחיקת המשימה המקומית דורשת אדמין: `Unregister-ScheduledTask -TaskName "HaMatzpan-MorningScan" -Confirm:$false`
+- **⚠ פעולה פתוחה שדורשת את המשתמש (לא ניתנת לביצוע מסוכן זה — חוסמת הרשאות אדמין):**
+  המשימה המקומית `HaMatzpan-MorningScan` תוקנה (הנתיב העברי) מוקדם בסבב הזה, לפני
+  שהוחלט להוציא אותה משימוש לגמרי — כלומר **היא פעילה שוב כרגע** ורצה במקביל ל-GitHub
+  Actions. זה לא משחית נתונים (שני התהליכים כותבים באופן אידמפוטנטי), אבל **עלול לגרום
+  למייל בוקר כפול** ולעומס API כפול. נסיתי 3 דרכים להשבית/למחוק אותה מתוך הסשן (
+  `Unregister-ScheduledTask`, `Disable-ScheduledTask`, `schtasks /Change`) — כולן נכשלו
+  ב-Access Denied כי זה דורש הרשאות אדמין שאין לי בסשן הזה. יש להריץ כמנהל:
+  ```powershell
+  Unregister-ScheduledTask -TaskName "HaMatzpan-MorningScan" -Confirm:$false
+  ```
