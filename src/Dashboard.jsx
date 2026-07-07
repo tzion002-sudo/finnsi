@@ -4,8 +4,9 @@ import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, s
          subscribeToMarketData, getMarketData, seedAssetsIfEmpty,
          subscribeToSettings, subscribeToAlerts,
          saveFundSnapshot, findExistingSnapshot, subscribeFundHistory,
-         subscribePriceHistory, subscribeToMstyDividends } from './lib/firestoreService';
+         subscribePriceHistory, subscribeToMstyDividends, subscribeFundReturns } from './lib/firestoreService';
 import { reconcileDividends } from './lib/dividendSync';
+import { estimateBalance, isGemelnetEligible, GEMELNET_ELIGIBLE_TRACKS } from './lib/fundEstimate';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -39,7 +40,7 @@ import {
 //  V2.6.3 — Firestore Connection Fix · forceLongPolling
 //  Firebase: finnsi-3a75d
 // ══════════════════════════════════════════════════════════════
-const APP_VERSION = "V3.0.0";
+const APP_VERSION = "V3.0.2";
 
 // ──────────── Persistence helpers (localStorage) ────────────
 const LS_PREFIX = "hamatzpan:v1:";
@@ -605,8 +606,13 @@ const SourceBadge = ({ source, confirmed }) => {
   );
 };
 
-const AssetRow = ({ a, onSpotCheck }) => {
+const AssetRow = ({ a, onSpotCheck, fundReturns }) => {
   const hasGemel = a.monthlyReturnFromGemelnet != null;
+  // V3.0 — אומדן יתרה בין דוחות PDF, מבוסס תשואות גמל-נט (תצוגה בלבד — לא נכתב ל-DB)
+  const estimate = useMemo(
+    () => (isGemelnetEligible(a) ? estimateBalance(a, fundReturns) : null),
+    [a, fundReturns]
+  );
   return (
     <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-4 sm:p-4 hover:border-slate-600 transition-colors shadow-sm hover:shadow-md">
       <div className="flex items-start justify-between gap-3 mb-2">
@@ -631,6 +637,11 @@ const AssetRow = ({ a, onSpotCheck }) => {
         <div className="text-left flex-shrink-0">
           <p className="text-2xl sm:text-xl font-bold text-white leading-tight">{fmt(a.reportBalance)}</p>
           <p className="text-[10px] text-slate-500">עודכן: {fmtDate(a.reportDate)}</p>
+          {estimate && (
+            <p className="text-[11px] text-cyan-400 font-mono mt-0.5" title={`אומדן — מבוסס תשואת גמל-נט עד ${estimate.throughYm} (${estimate.monthsApplied} חודשים) · הדוח הרשמי לא משתנה עד העלאת PDF חדש`}>
+              🔮 {fmt(estimate.estimatedBalance)} <span className="text-slate-500">אומדן·{estimate.throughYm}</span>
+            </p>
+          )}
         </div>
       </div>
       {hasGemel && (
@@ -3006,6 +3017,23 @@ function computeScanStaleness(scanDateStr) {
   return { stale: daysOld > maxAllowed, daysOld };
 }
 
+/**
+ * V3.0 — מנוי לתשואות גמל-נט החודשיות של כל המסלולים המאומתים (allowlist קבוע).
+ * מחזיר Map: trackCode → { monthly:[{ym,pct}], updatedAt } לשימוש ב-estimateBalance.
+ */
+function useFundReturns() {
+  const [byTrack, setByTrack] = useState({});
+  useEffect(() => {
+    const unsubs = GEMELNET_ELIGIBLE_TRACKS.map(trackCode =>
+      subscribeFundReturns(trackCode, data => {
+        setByTrack(prev => ({ ...prev, [trackCode]: data }));
+      })
+    );
+    return () => unsubs.forEach(u => { try { u?.(); } catch {} });
+  }, []);
+  return byTrack;
+}
+
 /** LiveMarketBar — רצועת מחירים בזמן אמת בראש הדשבורד
  *  V2.9.6: כפתור "עדכן מחירים" מפעיל GitHub Actions → Firestore → onSnapshot
  */
@@ -4498,6 +4526,8 @@ export default function HaMatzpanGemelnet() {
   const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, ghTrigger: marketGhTrigger, refresh: refreshMarket, scanDate, scanWarnings } = useLiveMarket();
   // V3.0 — שכבת אמינות: dead-man's switch עצמאי מ-GitHub Actions (מבוסס תאריך הנתונים בפועל)
   const scanStaleness = useMemo(() => computeScanStaleness(scanDate), [scanDate]);
+  // V3.0 — תשואות גמל-נט (לאומדן יתרה בין דוחות PDF)
+  const fundReturnsByTrack = useFundReturns();
 
   // V2.1.9 — עדכון אוטומטי של מחיר MSTY + שער USD/ILS מ-LiveMarket (אם אין _manualLock)
   // V2.5.2 — Firestore-Only: עדכון מחיר MSTY + FX ב-state בלבד (ללא lsSave)
@@ -5404,7 +5434,7 @@ export default function HaMatzpanGemelnet() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {list.map(a => (
                       <div key={a.id}>
-                        <AssetRow a={a} onSpotCheck={setSpotAsset}/>
+                        <AssetRow a={a} onSpotCheck={setSpotAsset} fundReturns={fundReturnsByTrack[a.trackCode]}/>
                         {isKid && <CompoundProjection asset={a}/>}
                       </div>
                     ))}

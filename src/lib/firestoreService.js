@@ -314,6 +314,25 @@ export function subscribeToMarketData(onData, onError) {
 }
 
 /**
+ * V3.0 — Real-time listener for fund_returns/{trackCode} (monthly gemel-net returns
+ * written weekly by the Node scanner — used only to compute a display-only balance
+ * ESTIMATE between quarterly PDF reports; never overwrites the authoritative reportBalance).
+ * Data shape: { trackCode, monthly: [{ym:"YYYY-MM", pct:number}], source, updatedAt }
+ * Returns an unsubscribe function.
+ */
+export function subscribeFundReturns(trackCode, onData, onError) {
+  if (!isFirebaseReady() || !trackCode) return () => {};
+  return onSnapshot(
+    doc(db, 'fund_returns', String(trackCode)),
+    snap => onData(snap.exists() ? snap.data() : null),
+    err => {
+      console.error(`subscribeFundReturns(${trackCode}):`, err);
+      if (onError) onError(err);
+    }
+  );
+}
+
+/**
  * V3.0 — Real-time listener for market_data/msty_dividends (server-authoritative
  * full dividend list written by the Node scanner with plausibility validation).
  * Data shape: { dividends: [{exDate, payDate, amount, status, source}], count, sourceUsed, updatedAt }
