@@ -18,7 +18,8 @@
 const SPLIT_DATE = "2025-12-08"; // reverse split 1:5
 
 const MS_PER_DAY = 86400000;
-const AMOUNT_EPSILON = 0.0005;
+// 0.00055 ולא 0.0005: seed ידני מעוגל ל-3 ספרות (0.373 מול 0.3725) והשוואת '<' נפלה על הסף
+const AMOUNT_EPSILON = 0.00055;
 
 /** הפרש ימים מוחלט בין שני תאריכי ISO (YYYY-MM-DD) */
 function daysApart(a, b) {
@@ -34,16 +35,19 @@ function sameAmount(a, b) {
 
 /**
  * התאמה בין דיבידנד שרת לרשומה (לוקאלית או tombstone):
- * תאריך זהה, או תאריך קרוב (≤ 2 ימים) עם סכום זהה.
+ * תאריך זהה, או תאריך קרוב (≤ 2 ימים) עם סכום זהה,
+ * או שהמועמד נרשם בתאריך התשלום של השרת (רישום ידני לפי pay date) עם סכום זהה.
  * @param {string} serverDate  exDate של השרת
  * @param {number} serverAmount
  * @param {string} candDate    תאריך המועמד (date/exDate)
  * @param {number} candAmount
+ * @param {string} [serverPayDate] payDate של השרת
  */
-export function isMatch(serverDate, serverAmount, candDate, candAmount) {
+export function isMatch(serverDate, serverAmount, candDate, candAmount, serverPayDate) {
   if (!serverDate || !candDate) return false;
   if (serverDate === candDate) return true;
-  return daysApart(serverDate, candDate) <= 2 && sameAmount(serverAmount, candAmount);
+  if (!sameAmount(serverAmount, candAmount)) return false;
+  return daysApart(serverDate, candDate) <= 2 || candDate === serverPayDate;
 }
 
 /**
@@ -83,7 +87,7 @@ export function reconcileDividends(serverList, localList, tombstones, options = 
     const isDeleted = tombs.some(t => isMatch(sd.exDate, sd.amount, t?.exDate ?? t?.date, t?.amount));
     if (isDeleted) continue;
 
-    const existing = merged.find(d => isMatch(sd.exDate, sd.amount, d?.date, d?.amount));
+    const existing = merged.find(d => isMatch(sd.exDate, sd.amount, d?.date, d?.amount, sd.payDate));
     if (existing) {
       // עריכה ידנית (verified) מנצחת את השרת
       if (existing.verified === true) continue;

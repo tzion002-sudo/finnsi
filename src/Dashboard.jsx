@@ -157,16 +157,15 @@ const MSTY_DEFAULTS = {
 // Post-split: שולמו על 118 מניות
 const MSTY_DIVIDENDS_SEED = [
   // ── יוני 2025 (חודשי, pre-split) ─ רכישה ב-20/05/2025 ──
-  { date:"2025-06-10", amount:1.478,  verified:true, shareBasis:"pre", note:"דיבידנד חודשי ראשון" },
+  { date:"2025-06-05", amount:1.4707, verified:true, shareBasis:"pre", note:"דיבידנד חודשי ראשון" },
   // ── יולי 2025 (חודשי, pre-split) ──
-  { date:"2025-07-07", amount:1.238,  verified:true, shareBasis:"pre" },
-  // ── אוגוסט 2025 (חודשי, pre-split) ──
-  { date:"2025-08-07", amount:1.18,   verified:true, shareBasis:"pre", note:"~$1.18" },
+  { date:"2025-07-03", amount:1.2382, verified:true, shareBasis:"pre" },
+  // ── אוגוסט 2025 — 31/07 ו-28/08 מגיעים מהסנכרון (השורה הידנית של 07/08 הייתה כפילות של 31/07) ──
   // ── ספטמבר 2025 (חודשי, pre-split) — מחיר מניה $15.37 ──
-  { date:"2025-09-26", amount:1.01,   verified:true, shareBasis:"pre", note:"מחיר מניה $15.37" },
+  { date:"2025-09-25", amount:1.0105, verified:true, shareBasis:"pre", note:"מחיר מניה $15.37" },
   // ── אוקטובר 2025 (מעבר לחלוקה שבועית, pre-split) ──
-  { date:"2025-10-03", amount:0.6074, verified:true, shareBasis:"pre", note:"מעבר לחלוקה שבועית" },
-  { date:"2025-10-17", amount:0.212,  verified:true, shareBasis:"pre" },
+  { date:"2025-10-16", amount:0.6074, verified:true, shareBasis:"pre", note:"מעבר לחלוקה שבועית" },
+  { date:"2025-10-23", amount:0.2122, verified:true, shareBasis:"pre" },
   { date:"2025-10-31", amount:0.1924, verified:true, shareBasis:"pre" },
   // ── נובמבר 2025 (שבועי, pre-split, 590 מניות) ──
   { date:"2025-11-07", amount:0.169,  verified:true, shareBasis:"pre" },
@@ -183,7 +182,7 @@ const MSTY_DIVIDENDS_SEED = [
   { date:"2026-01-09", amount:0.374,  verified:true, shareBasis:"post" },
   { date:"2026-01-16", amount:0.414,  verified:true, shareBasis:"post" },
   { date:"2026-01-23", amount:0.430,  verified:true, shareBasis:"post" },
-  { date:"2026-01-30", amount:0.373,  verified:true, shareBasis:"post" },
+  { date:"2026-01-29", amount:0.3725, verified:true, shareBasis:"post" },
   // ── פברואר 2026 (4 חלוקות, post-split) ──
   { date:"2026-02-06", amount:0.308,  verified:true, shareBasis:"post" },
   { date:"2026-02-13", amount:0.298,  verified:true, shareBasis:"post" },
