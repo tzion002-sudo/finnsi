@@ -48,7 +48,7 @@ describe("isGemelnetEligible", () => {
     expect(isGemelnetEligible({})).toBe(false);
   });
 
-  it("allowlist תואם בדיוק את 8 המסלולים שאומתו (7 גמל + פנסיה)", () => {
-    expect(GEMELNET_ELIGIBLE_TRACKS).toHaveLength(8);
+  it("allowlist תואם בדיוק את 9 המסלולים שאומתו (8 גמל/השתלמות + פנסיה)", () => {
+    expect(GEMELNET_ELIGIBLE_TRACKS).toHaveLength(9);
   });
 });

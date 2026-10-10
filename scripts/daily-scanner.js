@@ -727,7 +727,7 @@ async function fetchExcellenceHistory(realPrices) {
   console.log("\n🏦 V3.0.5 — שולף תשואות חודשיות (גמל-נט + פנסיה-נט, מקור: data.gov.il)...");
   try {
     const SOURCES = [
-      { name: "gemelnet",   resource: "a30dcbea-a1d2-482c-ae29-8f781f5025fb", tracks: [13245, 13246, 13342, 13343, 11327, 15738, 15739] },
+      { name: "gemelnet",   resource: "a30dcbea-a1d2-482c-ae29-8f781f5025fb", tracks: [13245, 13246, 13342, 13343, 11327, 15738, 15739, 456] },
       { name: "pensia-net", resource: "6d47d6b5-cb08-488b-b333-f1e717b1e1bd", tracks: [13887] },
     ];
     const now = new Date();
@@ -737,8 +737,9 @@ async function fetchExcellenceHistory(realPrices) {
     const addRow = (trackCode, period, pct, totalAssets) => {
       period = String(period);
       if (!trackCode || !/^\d{6}$/.test(period) || Number(period) < cutoffYm) return;
+      if (!Number.isFinite(pct)) return; // תשואה ריקה (קרן חדשה בחודש הקמה) — לא שגיאה
       totalRows++;
-      if (!Number.isFinite(pct) || Math.abs(pct) > 15) { rejected++; return; } // ולידציית-סבירות
+      if (Math.abs(pct) > 15) { rejected++; return; } // ולידציית-סבירות
       const ym = `${period.slice(0, 4)}-${period.slice(4, 6)}`;
       const arr = (byTrack[trackCode] ??= []);
       if (!arr.some(r => r.ym === ym)) arr.push({ ym, pct });

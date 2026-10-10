@@ -94,7 +94,9 @@ const ZOMBIE_ASSETS = [
 //        code > DB for policy fields (permanentNote, institution labels).
 // ══════════════════════════════════════════════════════════════
 const ASSET_POLICY = {
-  "7b": { permanentNote: "⚠️ הלוואה פעילה: 60,589 ₪" },
+  // trackCode 456 = "כלל השתלמות כללי" (אומת מדוח כלל 30/06/2026: חשבון 9968410, YTD 7.55% = CKAN 202606).
+  // 15003 הקודם לא היה קוד גמל-נט. ה-overlay מתקן גם את הנתון החי ב-Firestore.
+  "7b": { permanentNote: "⚠️ הלוואה פעילה: 60,589 ₪", trackCode: 456 },
 };
 
 /** Applies policy overrides on top of an asset list (pure function) */
@@ -105,7 +107,7 @@ const applyAssetPolicy = (list) =>
 
 const TRACK_COLOR = {
   13887:"#6366f1", 13245:"#a855f7", 13246:"#10b981", 5127790:"#14b8a6",
-  15003:"#f59e0b", 11327:"#ec4899", 13342:"#8b5cf6", 13343:"#06b6d4",
+  15003:"#f59e0b", 456:"#f59e0b", 11327:"#ec4899", 13342:"#8b5cf6", 13343:"#06b6d4",
   // V2.0.1 — קודים חדשים מהקובץ המצורף
   15725:"#7c3aed",  // מנורה מבטחים תגמולים מניות סחיר — זיו
   15738:"#db2777",  // אומגה קרן השתלמות מניות סחיר — הראל
@@ -126,7 +128,7 @@ const SEED = [
   { id:"5", owner:"ציון", type:"MSTY – דיבידנדים", institution:"אקסלנס", category:"dividend", trackCode:null, reportBalance:0, reportDate:"2026-04-18", checkDate:"2026-04-18", employeeDeposit:0, employerDeposit:0, severanceDeposit:0, isMSTY:true, sharesCount:118, originalShares:590, purchasePrice:23.45, purchaseDate:"2025-05-20", conversionDate:"2025-05-19", purchaseTotalUSD:13835.50, loanAmountILS:50000, loanStartFXRate:3.50, monthlyLoanPaymentILS:670, reverseSplitDate:"2025-12-08", reverseSplitRatio:5, source:"manual_truth" },
   { id:"6", owner:"זיו", type:"קרן פנסיה", institution:"מנורה מבטחים", accountNumber:"168", category:"pension", trackCode:13887, reportBalance:441646.40, reportDate:"2025-12-31", checkDate:"2025-12-31", employeeDeposit:1008, employerDeposit:1080, severanceDeposit:864, feeFromDeposit:1.39, feeFromBalance:0.11, source:"annual_report_2025" },
   { id:"7", owner:"זיו", type:"קופת גמל לחיסכון", institution:"כלל", accountNumber:"9969312", category:"long_term", trackCode:13343, reportBalance:40658.46, reportDate:"2025-12-31", checkDate:"2025-12-31", employeeDeposit:0, employerDeposit:0, severanceDeposit:0, feeFromDeposit:0, feeFromBalance:0.68, source:"annual_report_2025" },
-  { id:"7b", owner:"זיו", type:"קרן השתלמות – תמר", institution:"כלל", accountNumber:"9968410", category:"study_fund", trackCode:15003, reportBalance:161420, reportDate:"2026-04-17", checkDate:"2026-04-17", employeeDeposit:355, employerDeposit:1065, severanceDeposit:0, feeFromDeposit:0.01, feeFromBalance:0.68, studyLoan:{ active:true, amount:60589, locked:true }, permanentNote:"⚠️ הלוואה פעילה: 60,589 ₪", source:"manual_truth" },
+  { id:"7b", owner:"זיו", type:"קרן השתלמות – תמר", institution:"כלל", accountNumber:"9968410", category:"study_fund", trackCode:456, reportBalance:161420, reportDate:"2026-04-17", checkDate:"2026-04-17", employeeDeposit:355, employerDeposit:1065, severanceDeposit:0, feeFromDeposit:0.01, feeFromBalance:0.68, studyLoan:{ active:true, amount:60589, locked:true }, permanentNote:"⚠️ הלוואה פעילה: 60,589 ₪", source:"manual_truth" },
   { id:"8", owner:"הראל", type:"חיסכון לכל ילד", institution:"אלטשולר שחם", accountNumber:"40096434", category:"children", trackCode:11327, reportBalance:14536, reportDate:"2025-12-31", checkDate:"2025-12-31", employeeDeposit:57, employerDeposit:57, severanceDeposit:0, feeFromDeposit:0, feeFromBalance:0.23, source:"annual_report_2025" },
   { id:"9", owner:"ליאם", type:"חיסכון לכל ילד", institution:"אלטשולר שחם", accountNumber:"41898339", category:"children", trackCode:11327, reportBalance:9719, reportDate:"2025-12-31", checkDate:"2025-12-31", employeeDeposit:57, employerDeposit:57, severanceDeposit:0, feeFromDeposit:0, feeFromBalance:0.23, source:"annual_report_2025" },
   // ── V2.0.1 — קופות חדשות שזוהו בקובץ הגמל-נט 02/2025-02/2026 ──
