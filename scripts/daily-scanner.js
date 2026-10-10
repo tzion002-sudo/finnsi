@@ -718,56 +718,85 @@ async function fetchExcellenceHistory(realPrices) {
     } catch (e) { console.warn("  ⚠ בדיקת דוחות ישנים נכשלה:", e.message); }
   }
 
-  // ══ שלב 2.6: V3.0 — גמל-נט: תשואות חודשיות אוטומטיות (רק א'-ה', כמו TASE) ══
-  // API אמיתי שאומת ידנית מול gemelnet.cma.gov.il (07/2026):
-  //   GET tsuot/ui/tsuotHodXML.aspx?dochot=1&sug=3&miTkfDivuach=YYYYMM&adTkfDivuach=YYYYMM&kupot=CSV
-  //   Row: ID_KUPA (=trackCode) · TKF_DIVUACH (YYYYMM) · TSUA_NOMINALI_BFOAL (%)
-  // הערה קריטית: גמל-נט מכסה רק גמל/השתלמות/חיסכון-ילד — לא פנסיה (פנסיה-נט, מערכת
-  // נפרדת) ולא קרן כספית (קרן נאמנות). אומת ידנית מול 7 המסלולים — שמות הקרנות תואמים
-  // בדיוק את המוסדות שלנו. לא לנחש trackCode נוסף בלי אימות דומה (סיכון "job ירוק עם
-  // נתונים שגויים" שהמועצה הזהירה מפניו) — לכן allowlist מפורש, לא כל trackCode קיים.
-  console.log("\n🏦 V3.0 — שולף תשואות גמל-נט חודשיות (7 מסלולים מאומתים)...");
+  // ══ שלב 2.6: V3.0.5 — תשואות חודשיות רשמיות (גמל-נט + פנסיה-נט), א'-ה' ══
+  // מקור ראשי: data.gov.il (CKAN datastore רשמי של רשות שוק ההון, מתעדכן יומית).
+  //   gemelnet  resource a30dcbea…  — גמל/השתלמות/חיסכון-ילד
+  //   pensia-net resource 6d47d6b5… — קרנות פנסיה
+  // גיבוי לגמל בלבד: tsuotHodXML.aspx (נקודת קצה לא מתועדת של האתר).
+  // allowlist מפורש: לא מוסיפים trackCode בלי אימות מול הקטלוג (מונע "job ירוק עם נתונים שגויים").
+  console.log("\n🏦 V3.0.5 — שולף תשואות חודשיות (גמל-נט + פנסיה-נט, מקור: data.gov.il)...");
   try {
-    const GEMELNET_TRACKS = [13245, 13246, 13342, 13343, 11327, 15738, 15739];
+    const SOURCES = [
+      { name: "gemelnet",   resource: "a30dcbea-a1d2-482c-ae29-8f781f5025fb", tracks: [13245, 13246, 13342, 13343, 11327, 15738, 15739] },
+      { name: "pensia-net", resource: "6d47d6b5-cb08-488b-b333-f1e717b1e1bd", tracks: [13887] },
+    ];
     const now = new Date();
-    const endYm   = now.getFullYear() * 100 + (now.getMonth() + 1);          // חודש נוכחי
-    const startYm = (() => { const d = new Date(now); d.setMonth(d.getMonth() - 12); return d.getFullYear() * 100 + (d.getMonth() + 1); })();
-    const url = `https://gemelnet.cma.gov.il/tsuot/ui/tsuotHodXML.aspx?dochot=1&sug=3&miTkfDivuach=${startYm}&adTkfDivuach=${endYm}&kupot=${GEMELNET_TRACKS.join(",")}`;
-    const { status, body: xml } = await httpsRequest(url, { timeout: 15000 });
-    if (status === 200 && typeof xml === "string") {
-      const rowRegex = /<Row>([\s\S]*?)<\/Row>/gi;
-      const byTrack = {};
-      let rowMatch, totalRows = 0, rejected = 0;
-      while ((rowMatch = rowRegex.exec(xml)) !== null) {
-        const chunk = rowMatch[1];
-        const get = (tag) => { const m = new RegExp(`<${tag}>([^<]*)<\/${tag}>`).exec(chunk); return m ? m[1] : null; };
-        const trackCode = parseInt(get("ID_KUPA"), 10);
-        const period    = get("TKF_DIVUACH"); // "202603"
-        const pct       = parseFloat(get("TSUA_NOMINALI_BFOAL"));
-        if (!trackCode || !period || !/^\d{6}$/.test(period)) continue;
-        totalRows++;
-        if (!Number.isFinite(pct) || Math.abs(pct) > 15) { rejected++; continue; } // ולידציית-סבירות
-        const ym = `${period.slice(0, 4)}-${period.slice(4, 6)}`;
-        (byTrack[trackCode] ??= []).push({ ym, pct });
-      }
-      if (rejected > 0) warnings.push(`fund_returns: ${rejected}/${totalRows} רשומות נפסלו בוולידציה (תשואה מחוץ ל-±15%)`);
+    const cutoffYm = (() => { const d = new Date(now); d.setMonth(d.getMonth() - 13); return d.getFullYear() * 100 + (d.getMonth() + 1); })();
+    const byTrack = {}, meta = {};
+    let totalRows = 0, rejected = 0;
+    const addRow = (trackCode, period, pct, totalAssets) => {
+      period = String(period);
+      if (!trackCode || !/^\d{6}$/.test(period) || Number(period) < cutoffYm) return;
+      totalRows++;
+      if (!Number.isFinite(pct) || Math.abs(pct) > 15) { rejected++; return; } // ולידציית-סבירות
+      const ym = `${period.slice(0, 4)}-${period.slice(4, 6)}`;
+      const arr = (byTrack[trackCode] ??= []);
+      if (!arr.some(r => r.ym === ym)) arr.push({ ym, pct });
+      if (Number.isFinite(totalAssets) && ym >= (meta[trackCode]?.ym || "")) meta[trackCode] = { ym, totalAssets };
+    };
 
-      const writes = Object.entries(byTrack).map(([trackCode, monthly]) => {
-        monthly.sort((a, b) => a.ym.localeCompare(b.ym));
-        return fsWrite("fund_returns", trackCode, {
-          trackCode: Number(trackCode), monthly, source: "gemelnet", updatedAt: NOW_ISO,
-        }, `fund_returns/${trackCode}`);
-      });
-      await Promise.all(writes);
-      console.log(`  ✅ גמל-נט: ${Object.keys(byTrack).length}/${GEMELNET_TRACKS.length} מסלולים · ${totalRows - rejected} נתוני תשואה`);
-      const missing = GEMELNET_TRACKS.filter(t => !byTrack[t]);
-      if (missing.length) console.log(`  ℹ אין נתונים החודש עבור מסלולים: ${missing.join(", ")}`);
-    } else {
-      warnings.push("גמל-נט: הבקשה נכשלה — תשואות לא עודכנו");
+    for (const src of SOURCES) {
+      try {
+        const qs = new URLSearchParams({
+          resource_id: src.resource, limit: "1000", sort: "REPORT_PERIOD desc",
+          filters: JSON.stringify({ FUND_ID: src.tracks }),
+        });
+        const { status, body } = await httpsRequest(`https://data.gov.il/api/3/action/datastore_search?${qs}`, { timeout: 20000 });
+        const recs = body?.result?.records;
+        if (status !== 200 || !Array.isArray(recs)) throw new Error(`HTTP ${status}`);
+        recs.forEach(r => addRow(Number(r.FUND_ID), r.REPORT_PERIOD, parseFloat(r.MONTHLY_YIELD), parseFloat(r.TOTAL_ASSETS)));
+      } catch (e) {
+        warnings.push(`${src.name} (data.gov.il): ${e.message}`);
+      }
     }
+
+    // גיבוי: גמל-נט XML — רק למסלולי גמל שלא הגיעו מ-CKAN
+    const gemelMissing = SOURCES[0].tracks.filter(t => !byTrack[t]);
+    if (gemelMissing.length) {
+      try {
+        const endYm = now.getFullYear() * 100 + (now.getMonth() + 1);
+        const url = `https://gemelnet.cma.gov.il/tsuot/ui/tsuotHodXML.aspx?dochot=1&sug=3&miTkfDivuach=${cutoffYm}&adTkfDivuach=${endYm}&kupot=${gemelMissing.join(",")}`;
+        const { status, body: xml } = await httpsRequest(url, { timeout: 15000 });
+        if (status === 200 && typeof xml === "string") {
+          const rowRegex = /<Row>([\s\S]*?)<\/Row>/gi;
+          let m;
+          while ((m = rowRegex.exec(xml)) !== null) {
+            const get = (tag) => { const x = new RegExp(`<${tag}>([^<]*)<\/${tag}>`).exec(m[1]); return x ? x[1] : null; };
+            addRow(parseInt(get("ID_KUPA"), 10), get("TKF_DIVUACH"), parseFloat(get("TSUA_NOMINALI_BFOAL")), NaN);
+          }
+          console.log(`  ↩ גיבוי XML שימש עבור ${gemelMissing.join(", ")}`);
+        }
+      } catch (e) { warnings.push(`גמל-נט XML (גיבוי): ${e.message}`); }
+    }
+    if (rejected > 0) warnings.push(`fund_returns: ${rejected}/${totalRows} רשומות נפסלו בוולידציה (תשואה מחוץ ל-±15%)`);
+
+    const writes = Object.entries(byTrack).map(([trackCode, monthly]) => {
+      monthly.sort((a, b) => a.ym.localeCompare(b.ym));
+      const src = SOURCES.find(s => s.tracks.includes(Number(trackCode)));
+      return fsWrite("fund_returns", trackCode, {
+        trackCode: Number(trackCode), monthly, source: src?.name || "gemelnet", updatedAt: NOW_ISO,
+        latestYm: monthly[monthly.length - 1].ym,
+        totalAssetsMln: meta[trackCode]?.totalAssets ?? null, // מיליוני ₪, AUM של המסלול
+      }, `fund_returns/${trackCode}`);
+    });
+    await Promise.all(writes);
+    const allTracks = SOURCES.flatMap(s => s.tracks);
+    console.log(`  ✅ תשואות: ${Object.keys(byTrack).length}/${allTracks.length} מסלולים · ${totalRows - rejected} נתונים`);
+    const missing = allTracks.filter(t => !byTrack[t]);
+    if (missing.length) { console.log(`  ℹ אין נתונים עבור מסלולים: ${missing.join(", ")}`); warnings.push(`fund_returns: חסרים מסלולים ${missing.join(", ")}`); }
   } catch (e) {
-    console.warn("  ⚠ גמל-נט נכשל:", e.message);
-    warnings.push(`גמל-נט: ${e.message}`);
+    console.warn("  ⚠ תשואות חודשיות נכשל:", e.message);
+    warnings.push(`תשואות חודשיות: ${e.message}`);
   }
 
   // ══ שלב 3: דיבידנד MSTY (V2.7.0: yieldmaxetfs.com ראשוני, Yahoo fallback) ══

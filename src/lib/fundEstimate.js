@@ -11,7 +11,8 @@
 //  שמות הקרנות שהתקבלו תואמים בדיוק את המוסדות שלנו.
 // ═══════════════════════════════════════════════════════════════
 
-export const GEMELNET_ELIGIBLE_TRACKS = [13245, 13246, 13342, 13343, 11327, 15738, 15739];
+export const GEMELNET_ELIGIBLE_TRACKS = [13245, 13246, 13342, 13343, 11327, 15738, 15739,
+  13887]; // 13887 = פנסיה (מנורה) — מגיע מפנסיה-נט, לא מגמל-נט; אותו pipeline (fund_returns)
 
 export function isGemelnetEligible(asset) {
   return !!asset?.trackCode && GEMELNET_ELIGIBLE_TRACKS.includes(asset.trackCode);

@@ -43,12 +43,12 @@ describe("estimateBalance", () => {
 describe("isGemelnetEligible", () => {
   it("מאשר רק trackCodes מאומתים", () => {
     expect(isGemelnetEligible({ trackCode: 13245 })).toBe(true);
-    expect(isGemelnetEligible({ trackCode: 13887 })).toBe(false); // פנסיה — לא בגמל-נט
+    expect(isGemelnetEligible({ trackCode: 13887 })).toBe(true); // פנסיה — מפנסיה-נט (data.gov.il)
     expect(isGemelnetEligible({ trackCode: 5127790 })).toBe(false); // קרן כספית — לא בגמל-נט
     expect(isGemelnetEligible({})).toBe(false);
   });
 
-  it("allowlist תואם בדיוק את 7 המסלולים שאומתו", () => {
-    expect(GEMELNET_ELIGIBLE_TRACKS).toHaveLength(7);
+  it("allowlist תואם בדיוק את 8 המסלולים שאומתו (7 גמל + פנסיה)", () => {
+    expect(GEMELNET_ELIGIBLE_TRACKS).toHaveLength(8);
   });
 });

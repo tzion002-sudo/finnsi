@@ -992,6 +992,50 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
     });
   }, [chartData, tracksWithSeries]);
 
+  // ── V3.0.5: בריאות נתונים — איזה נכס מתעדכן אוטומטית ואיזה רק עם דוח ──
+  const healthSection = (
+    <details className="mb-6 bg-slate-800/50 border border-slate-700 rounded-2xl p-4">
+      <summary className="cursor-pointer text-sm font-semibold text-slate-200">
+        🩺 בריאות נתונים — {rawAssets.filter(a => isGemelnetEligible(a) && fundReturns[a.trackCode]?.monthly?.length).length}/
+        {rawAssets.filter(a => a.trackCode && !["dividend"].includes(a.category)).length} קופות מתעדכנות אוטומטית
+      </summary>
+      <div className="overflow-x-auto mt-3">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-slate-400 text-right border-b border-slate-700">
+              <th className="py-1 px-2 font-medium">קופה</th>
+              <th className="py-1 px-2 font-medium">עדכון</th>
+              <th className="py-1 px-2 font-medium">נתון חודשי אחרון</th>
+              <th className="py-1 px-2 font-medium">דוח רשמי</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rawAssets.filter(a => a.category !== "dividend").map(a => {
+              const fr = fundReturns[a.trackCode];
+              const auto = isGemelnetEligible(a) && fr?.monthly?.length;
+              const last = auto ? fr.monthly[fr.monthly.length - 1].ym : null;
+              return (
+                <tr key={a.id} className="border-b border-slate-800">
+                  <td className="py-1 px-2 text-slate-200">{a.owner} · {a.type}</td>
+                  <td className="py-1 px-2">
+                    <span className={auto ? "text-emerald-400" : "text-amber-400"}>
+                      {auto ? (fr.source === "pensia-net" ? "אוטומטי · פנסיה-נט" : "אוטומטי · גמל-נט") : "ידני (דוח)"}
+                    </span>
+                  </td>
+                  <td className="py-1 px-2 text-slate-300 font-mono">{last || "—"}</td>
+                  <td className="py-1 px-2 text-slate-400">{a.reportDate ? fmtDate(a.reportDate) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[11px] text-slate-500 mt-2">
+        נתוני גמל/פנסיה מתפרסמים ברשות שוק ההון כ-2–6 שבועות אחרי סוף החודש, ולכן הנתון האחרון הוא תמיד החודש שפורסם.
+      </p>
+    </details>
+  );
+
   // ── Section A: Fund History Charts (from PDF reports) ─────────
   const fundHistorySection = (
     <div className="mb-6">
@@ -1131,6 +1175,7 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
   if (!tracksWithSeries.length) {
     return (
       <div>
+        {healthSection}
         {fundHistorySection}
         <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-10 text-center">
           <FileSpreadsheet size={48} className="mx-auto text-slate-600 mb-3"/>
@@ -1145,6 +1190,7 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
 
   return (
     <div>
+      {healthSection}
       {fundHistorySection}
 
       <div className="mb-6">
@@ -1152,7 +1198,7 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
           <TrendingUp size={18} className="text-emerald-400"/>
           תשואות חודשיות — מקור: גמל-נט
         </h2>
-        <p className="text-xs text-slate-500">מתעדכן אוטומטית מהסקנר היומי (7 מסלולי גמל-נט) · חודשים חסרים משלימים ב-Interpolation ליניארי</p>
+        <p className="text-xs text-slate-500">מתעדכן אוטומטית מהסקנר היומי (גמל-נט) · חודשים חסרים משלימים ב-Interpolation ליניארי</p>
       </div>
 
       <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 mb-4">
