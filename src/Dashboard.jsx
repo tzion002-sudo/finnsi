@@ -874,7 +874,7 @@ const SuccessModal = ({ result, onClose, onConfirmFirestore }) => {
 // ══════════════════════════════════════════════════════════════
 //  PERFORMANCE TAB — גרף ביצועים היסטורי
 // ══════════════════════════════════════════════════════════════
-const PerformanceTab = ({ assets }) => {
+const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
   // ── Fund history (quarterly reports) ──────────────────────────
   const [fundHistory,     setFundHistory]     = useState([]);
   const [historyOwner,    setHistoryOwner]    = useState('כולם');
@@ -947,6 +947,15 @@ const PerformanceTab = ({ assets }) => {
   }, [fundHistory]);
 
   // ── Existing גמל-נט performance ────────────────────────────────
+  // V3.0.5 — מיזוג תשואות גמל-נט האוטומטיות (fund_returns, מהסקנר היומי) עם סדרות שהועלו ידנית.
+  // לפי חודש; האוטומטי גובר (טרי יותר, אותו מקור). בלי זה הלשונית התעדכנה רק בהעלאת קובץ.
+  const assets = useMemo(() => rawAssets.map(a => {
+    const auto = fundReturns[a.trackCode]?.monthly;
+    if (!isGemelnetEligible(a) || !Array.isArray(auto) || !auto.length) return a;
+    const byIso = new Map((a.monthlySeries || []).map(s => [s.iso, s]));
+    auto.forEach(m => { if (m?.ym && Number.isFinite(m.pct)) byIso.set(m.ym, { iso: m.ym, value: m.pct }); });
+    return { ...a, monthlySeries: [...byIso.values()].sort((x, y) => x.iso.localeCompare(y.iso)) };
+  }), [rawAssets, fundReturns]);
   const tracksWithSeries = assets.filter(a => a.monthlySeries?.length);
 
   const chartData = useMemo(() => {
@@ -1127,7 +1136,7 @@ const PerformanceTab = ({ assets }) => {
           <FileSpreadsheet size={48} className="mx-auto text-slate-600 mb-3"/>
           <h3 className="text-lg font-semibold text-slate-300 mb-2">אין נתוני גמל-נט</h3>
           <p className="text-sm text-slate-500 mb-4">
-            העלה קובץ גמל-נט כדי לראות גרף תשואות חודשי לאורך השנה האחרונה.
+            הסקנר היומי ימלא את הגרף אוטומטית; אפשר גם להעלות קובץ גמל-נט ידנית.
           </p>
         </div>
       </div>
@@ -1143,7 +1152,7 @@ const PerformanceTab = ({ assets }) => {
           <TrendingUp size={18} className="text-emerald-400"/>
           תשואות חודשיות — מקור: גמל-נט
         </h2>
-        <p className="text-xs text-slate-500">השלמת חודשים חסרים באמצעות Interpolation ליניארי</p>
+        <p className="text-xs text-slate-500">מתעדכן אוטומטית מהסקנר היומי (7 מסלולי גמל-נט) · חודשים חסרים משלימים ב-Interpolation ליניארי</p>
       </div>
 
       <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-5 mb-4">
@@ -5461,7 +5470,7 @@ export default function HaMatzpanGemelnet() {
         </>
       )}
 
-      {tab === "performance" && <PerformanceTab assets={assets}/>}
+      {tab === "performance" && <PerformanceTab assets={assets} fundReturns={fundReturnsByTrack}/>}
       {tab === "excellence"  && <ExcellenceTab
                                   longTerm={excellenceLongTerm}
                                   setLongTerm={setExcellenceLongTerm}
