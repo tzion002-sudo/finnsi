@@ -22,11 +22,15 @@ describe("estimateBalance — הפקדות, דמי ניהול, חודש חלקי
     expect(r.estimatedBalance).toBeCloseTo(1200 * 0.99 + 99, 2); // 1% דמי ניהול חודשי + 99 הפקדה נטו
   });
 
-  it("מבחן-אמת: זיו 7b מול דוח כלל 30.06.2026 (168,266 ₪) — סטייה עד 2%", () => {
-    const r = estimateBalance(ZIV_7B, RET_456);
+  it("מבחן-אמת: דוח רבעוני כלל 7b — 148,829 ₪ (1.1.26) → 168,266 ₪ (30.6.26), סטייה עד 0.5%", () => {
+    // מקור: דוח רבעוני כלל השתלמות, חשבון 9968410 — הפקדות 8,497, רווחים 11,483, דמי ניהול 543
+    const ytd = { monthly: [
+      { ym: "2026-01", pct: 2.66 }, { ym: "2026-02", pct: 0.98 }, { ym: "2026-03", pct: -2.25 }, ...RET_456.monthly,
+    ]};
+    const r = estimateBalance({ ...ZIV_7B, reportBalance: 148829, reportDate: "2025-12-31" }, ytd);
     const deviation = (r.estimatedBalance - 168266) / 168266;
     console.log(`  7b: אומדן ${r.estimatedBalance} מול דוח 168266 → סטייה ${(deviation * 100).toFixed(2)}%`);
-    expect(Math.abs(deviation)).toBeLessThan(0.02);
+    expect(Math.abs(deviation)).toBeLessThan(0.005);
   });
 });
 
@@ -107,7 +111,7 @@ describe("rateOn (שער יציג לפי תאריך)", () => {
 });
 
 describe("estimateDeviation (כיול מול דוח חדש)", () => {
-  it("7b: אומדן מול דוח כלל 30.06.2026 → סטייה ~1.35%", () => {
+  it("7b: נקודת פתיחה לא מדויקת (161,420 ב-17.04) → סטייה ~1.35% נמדדת ומדווחת", () => {
     const dev = estimateDeviation(ZIV_7B, RET_456, 168266, "2026-06-30");
     expect(dev.pct).toBeCloseTo(1.35, 1);
     expect(dev.actual).toBe(168266);
