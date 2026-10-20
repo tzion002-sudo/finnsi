@@ -1936,14 +1936,15 @@ function d_notes_for_month(items) {
   );
 }
 
-const MSTYTab = ({ msty, dividends, fxByDate, setDividends, fx, setFx, currentPrice, setCurrentPrice, onDeleteDividend }) => {
+const MSTYTab = ({ msty, linkedLoan, dividends, fxByDate, setDividends, fx, setFx, currentPrice, setCurrentPrice, onDeleteDividend }) => {
   const [newDivDate, setNewDivDate] = useState("");
   const [newDivAmount, setNewDivAmount] = useState("");
   const [taxRate, setTaxRate] = useState(msty?.taxRate ?? 0.25);
 
   const loanStart   = msty?.purchaseDate || "2025-07-15";
   const loanAmount  = msty?.loanAmountILS || 50000;
-  const loanMonthly = msty?.monthlyLoanPaymentILS || 670;
+  // V3.1 — ההלוואה המקושרת בלשונית ההלוואות (linkedMSTY) היא מקור האמת לתשלום וליתרה
+  const loanMonthly = linkedLoan?.monthlyPayment || msty?.monthlyLoanPaymentILS || 670;
   const purchasePrc = msty?.purchasePrice || 23.5;
   const originalSh  = msty?.originalShares || 590;
   const splitDate   = msty?.reverseSplitDate || MSTY_REVERSE_SPLIT_DATE;
@@ -1995,7 +1996,7 @@ const MSTYTab = ({ msty, dividends, fxByDate, setDividends, fx, setFx, currentPr
       (new Date().getMonth() - new Date(loanStart).getMonth())
     );
     const totalLoanPaid = monthsElapsed * loanMonthly;
-    const loanRemaining = Math.max(0, loanAmount - totalLoanPaid);
+    const loanRemaining = linkedLoan?.currentBalance ?? Math.max(0, loanAmount - totalLoanPaid); // ליניארי רק כגיבוי
     const avgMonthlyNetILS = totalNetILS / monthsElapsed;
     const coverageRatio = avgMonthlyNetILS / loanMonthly;
     const initialInvestUSD = originalSh * purchasePrc;
@@ -2013,7 +2014,7 @@ const MSTYTab = ({ msty, dividends, fxByDate, setDividends, fx, setFx, currentPr
       unrealizedPL_ILS, totalReturnILS,
       estimatesCount, estimatesNetUSD, estimatesNetILS: estimatesNetUSD * fx,
     };
-  }, [enriched, fx, currentPrice, sharesNow, originalSh, purchasePrc, loanAmount, loanMonthly, loanStart, msty]);
+  }, [enriched, fx, currentPrice, sharesNow, originalSh, purchasePrc, loanAmount, loanMonthly, loanStart, msty, linkedLoan]);
 
   /** נתונים לגרף: חלוקות מצטברות (נטו) מול יתרת הלוואה */
   const chartData = useMemo(() => {
@@ -5596,6 +5597,7 @@ export default function HaMatzpanGemelnet() {
                                 />}
       {tab === "msty"        && <MSTYTab
                                   msty={assets.find(a => a.isMSTY)}
+                                  linkedLoan={loans.find(l => l.linkedMSTY)}
                                   dividends={mstyDividends}
                                   fxByDate={serverDividends?.fxByDate}
                                   setDividends={setMstyDividends}
