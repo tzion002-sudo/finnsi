@@ -7,6 +7,7 @@ import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, s
          subscribePriceHistory, subscribeToMstyDividends, subscribeFundReturns } from './lib/firestoreService';
 import { reconcileDividends } from './lib/dividendSync';
 import { estimateBalance, isGemelnetEligible, GEMELNET_ELIGIBLE_TRACKS } from './lib/fundEstimate';
+import { computeTotals, loanBalance } from './lib/netWorth';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -655,7 +656,7 @@ const AssetRow = ({ a, onSpotCheck, fundReturns }) => {
           <p className="text-2xl sm:text-xl font-bold text-white leading-tight">{fmt(a.reportBalance)}</p>
           <p className="text-[10px] text-slate-500">עודכן: {fmtDate(a.reportDate)}</p>
           {estimate && (
-            <p className="text-[11px] text-cyan-400 font-mono mt-0.5" title={`אומדן — מבוסס תשואת גמל-נט עד ${estimate.throughYm} (${estimate.monthsApplied} חודשים) · הדוח הרשמי לא משתנה עד העלאת PDF חדש`}>
+            <p className="text-[11px] text-cyan-400 font-mono mt-0.5" title={`אומדן — יתרת הדוח + תשואה רשמית עד ${estimate.throughYm} (${estimate.monthsApplied} חודשים) + הפקדות − דמי ניהול · הדוח הרשמי לא משתנה עד העלאת PDF חדש`}>
               🔮 {fmt(estimate.estimatedBalance)} <span className="text-slate-500">אומדן·{estimate.throughYm}</span>
             </p>
           )}
@@ -1404,6 +1405,18 @@ const LoansTab = ({ loans, setLoans }) => {
                         <div className="h-1 bg-slate-800 rounded overflow-hidden">
                           <div className="h-full bg-emerald-500" style={{width:`${Math.min(100, progress)}%`}}/>
                         </div>
+                        {/* V3.1 — בקרה: יתרה לפי לוח שפיצר (תשלום × ריבית × תאריך סיום) מול היתרה הידנית */}
+                        {(() => {
+                          const calc = loanBalance(l);
+                          if (calc == null || !l.currentBalance) return null;
+                          const off = Math.abs(calc - l.currentBalance) / l.currentBalance > 0.05;
+                          return (
+                            <span className={`text-[10px] font-mono ${off ? "text-amber-300" : "text-slate-500"}`}
+                              title="ערך נוכחי של התשלומים שנותרו עד תאריך הסיום. פער גדול = יתרה, תשלום, ריבית או תאריך סיום לא מעודכנים">
+                              {off ? "⚠️ " : ""}מחושב: {fmt(calc)}
+                            </span>
+                          );
+                        })()}
                       </div>
                     </td>
                     <td className="p-2">
@@ -5093,25 +5106,11 @@ export default function HaMatzpanGemelnet() {
     }
   };
 
-  const totals = useMemo(() => {
-    let total = 0, byOwner = {}, byCat = {};
-    assets.forEach(a => {
-      // עבור MSTY — חשב שווי שוק חי (מחיר × מניות × שער) במקום reportBalance (0)
-      let val = a.reportBalance || 0;
-      if (a.isMSTY) {
-        const shares = a.sharesCount || 0;
-        val = shares * (mstyPrice || 0) * (mstyFX || 0);
-      }
-      total += val;
-      byOwner[a.owner] = (byOwner[a.owner] || 0) + val;
-      byCat[a.category] = (byCat[a.category] || 0) + val;
-    });
-    // סה"כ חובות (יתרת הלוואות פתוחות) — ההלוואה נגד הפנסיה של ציון שימשה לקניית MSTY
-    const loansBalance = loans.reduce((s, l) => s + (l.currentBalance || 0), 0);
-    // שווי נטו = סה"כ נכסים (כולל MSTY בשווי שוק) פחות יתרת הלוואות
-    const netWorth = total - loansBalance;
-    return { total, byOwner, byCat, loansBalance, netWorth };
-  }, [assets, loans, mstyPrice, mstyFX]);
+  // V3.1 — netWorth.js: אומדן מגולגל לקופות (הפקדות + דמי ניהול), MSTY בשווי שוק, אחרת יתרת דוח
+  const totals = useMemo(
+    () => computeTotals(assets, loans, { mstyPrice, fx: mstyFX, fundReturnsByTrack }),
+    [assets, loans, mstyPrice, mstyFX, fundReturnsByTrack]
+  );
 
   const handleFileUpload = async (e) => {
     setUploadError(null);
@@ -5366,14 +5365,14 @@ export default function HaMatzpanGemelnet() {
               value={fmt(totals.netWorth)}
               color={totals.netWorth >= 0 ? "text-emerald-400" : "text-rose-400"}
               icon={<DollarSign size={16}/>}
-              sub={`נכסים ${fmt(totals.total)} − חוב ${fmt(totals.loansBalance)}`}
+              sub={`נכסים ${fmt(totals.total)} − חוב ${fmt(totals.loansBalance)}${totals.estimatedCount ? ` · לפי דוחות בלבד: ${fmt(totals.officialTotal - totals.loansBalance)}` : ""}`}
             />
             <StatCard
               label="סך נכסים (כולל MSTY שוק)"
               value={fmt(totals.total)}
               color="text-sky-300"
               icon={<TrendingUp size={16}/>}
-              sub={lastSyncDate ? `סונכרן: ${fmtDate(lastSyncDate)}` : "המתנה לסנכרון"}
+              sub={totals.estimatedCount ? `${totals.estimatedCount} קופות באומדן (תשואות רשמיות עד ${totals.oldestYm})` : (lastSyncDate ? `סונכרן: ${fmtDate(lastSyncDate)}` : "המתנה לסנכרון")}
             />
             <StatCard
               label="יתרת הלוואות"

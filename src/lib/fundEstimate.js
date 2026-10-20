@@ -20,8 +20,12 @@ export function isGemelnetEligible(asset) {
 }
 
 /**
- * מחשב יתרה משוערת לנכס בודד מרשימת תשואות חודשיות של גמל-נט.
- * @param {{reportBalance:number, reportDate:string}} asset
+ * מחשב יתרה משוערת לנכס בודד: גלגול קדימה של יתרת הדוח לפי תשואות רשמיות.
+ * לכל חודש: יתרה × (1+תשואה) × (1 − דמי ניהול מצבירה/12) + הפקדות × (1 − דמי ניהול מהפקדה).
+ * התשואה בגמל-נט/פנסיה-נט היא לפני דמי ניהול — לכן מנכים feeFromBalance.
+ * חודש הדוח עצמו נכלל באופן יחסי לימים שנותרו בו (דוח ב-17.04 → 13/30 מאפריל).
+ * @param {{reportBalance:number, reportDate:string, employeeDeposit?:number, employerDeposit?:number,
+ *          severanceDeposit?:number, feeFromBalance?:number, feeFromDeposit?:number}} asset
  * @param {{monthly: Array<{ym:string, pct:number}>}} fundReturnsDoc
  * @returns {{estimatedBalance:number, throughYm:string, monthsApplied:number} | null}
  */
@@ -31,13 +35,24 @@ export function estimateBalance(asset, fundReturnsDoc) {
   if (!Array.isArray(monthly) || monthly.length === 0) return null;
 
   const reportYm = asset.reportDate.slice(0, 7); // "YYYY-MM-DD" → "YYYY-MM"
+  const [y, mo, d] = asset.reportDate.split("-").map(Number);
+  const daysInMonth = new Date(y, mo, 0).getDate();
+  const firstFraction = Math.max(0, (daysInMonth - d) / daysInMonth); // סוף חודש → 0
+
   const relevant = monthly
-    .filter(m => m?.ym > reportYm && Number.isFinite(m?.pct))
+    .filter(m => Number.isFinite(m?.pct) && (m?.ym > reportYm || (m?.ym === reportYm && firstFraction > 0)))
     .sort((a, b) => a.ym.localeCompare(b.ym));
   if (relevant.length === 0) return null;
 
+  const deposits = (asset.employeeDeposit || 0) + (asset.employerDeposit || 0) + (asset.severanceDeposit || 0);
+  const netDeposit = deposits * (1 - (asset.feeFromDeposit || 0) / 100);
+  const monthlyFee = (asset.feeFromBalance || 0) / 100 / 12;
+
   let balance = asset.reportBalance;
-  for (const m of relevant) balance *= 1 + m.pct / 100;
+  for (const m of relevant) {
+    const f = m.ym === reportYm ? firstFraction : 1;
+    balance = balance * Math.pow((1 + m.pct / 100) * (1 - monthlyFee), f) + netDeposit * f;
+  }
 
   return {
     estimatedBalance: Math.round(balance * 100) / 100,
