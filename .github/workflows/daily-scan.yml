@@ -2,9 +2,12 @@ name: Daily Market Scan
 
 on:
   schedule:
-    # ב-05:00 UTC = 08:00 ישראל (קיץ UTC+3) — ראשון עד שישי
-    # ראשון: TASE נסחרת (אקסלנס) · שישי: דיבידנד MSTY שהוכרז חמישי
+    # בוקר — סריקה מלאה: 05:00 UTC = 08:00 ישראל בקיץ / 07:00 בחורף — ראשון עד שישי
+    # (מחירי סגירה של ארה"ב מאתמול · שישי: דיבידנד MSTY שהוכרז חמישי)
     - cron: '0 5 * * 0-5'
+    # V3.1 ערב — מחירים בלבד: 15:45 UTC = 18:45 ישראל בקיץ / 17:45 בחורף — שני עד שישי
+    # (אחרי סגירת ת"א (מסחר ב'-ו' מינואר 2026) ופרסום השער היציג ~15:45; ארה"ב באמצע מסחר)
+    - cron: '45 15 * * 1-5'
   workflow_dispatch:
     # מאפשר הרצה ידנית מ-GitHub Actions בלחיצת כפתור
 
@@ -33,6 +36,8 @@ jobs:
         run: node scripts/daily-scanner.js
         env:
           NODE_ENV: production
+          # V3.1 — ריצת הערב: מחירים בלבד (בלי חדשות/מייל/וואטסאפ)
+          SCAN_MODE: ${{ github.event.schedule == '45 15 * * 1-5' && 'prices' || 'full' }}
           # V2.9.0 — WhatsApp Business Cloud API (אופציונלי — דוח שבועי בכל יום שני)
           # הגדרה: developers.facebook.com/apps → WhatsApp → Getting Started
           WHATSAPP_TOKEN:    ${{ secrets.WHATSAPP_TOKEN }}

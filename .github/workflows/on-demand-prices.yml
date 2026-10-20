@@ -33,6 +33,7 @@ jobs:
         run: node scripts/daily-scanner.js
         env:
           NODE_ENV: production
+          SCAN_MODE: prices   # V3.1 — מחירים בלבד: מהיר, לא דורס חדשות/תשואות
           # ☝️ במכוון לא מעבירים GMAIL_* או WHATSAPP_* כדי שלא יישלחו הודעות
           #    בכל לחיצה על "עדכן מחירים". הסקנר היומי השלם (daily-scan.yml)
           #    הוא היחיד ששולח את דוח הבוקר.

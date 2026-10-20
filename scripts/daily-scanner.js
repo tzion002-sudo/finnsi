@@ -30,6 +30,9 @@ const NOW_ISO     = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Jerusal
 const IS_THURSDAY = new Date().getDay() === 4;
 const IS_MONDAY   = new Date().getDay() === 1; // V2.9.0: שני = שליחת דוח שבועי WhatsApp
 const TAX_RATE    = 0.25; // מס רווחי הון ישראלי
+// V3.1 — ריצת ערב "מחירים בלבד" (SCAN_MODE=prices): מדלג על חדשות/תרגום/תעלות/מייל/וואטסאפ/תשואות חודשיות
+const PRICES_ONLY = process.env.SCAN_MODE === "prices";
+const MAX_DAILY_MOVE = 0.25; // V3.1 — בדיקת סבירות: מחיר שזז יותר מ-25% מול הסריקה הקודמת לא נכתב
 
 // V2.9.0 — WhatsApp Business Cloud API (אופציונלי)
 const WHATSAPP_TOKEN    = process.env.WHATSAPP_TOKEN    || null;
@@ -103,7 +106,8 @@ async function tasePriceILS(shareId, yahooTicker) {
     if (status === 200 && raw != null && raw > 100) { // אגורות (>100)
       const cur = parseFloat((raw / 100).toFixed(4));
       console.log(`    ✅ TASE API: ${id} = ₪${cur} (${raw} אגורות · ${body?.TradeDate || ""})`);
-      return { price: cur, changePct: null, source: "TASE Official API", isFallback: false };
+      const d = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(body?.EODTradeDate || body?.TradeDate || "");
+      return { price: cur, changePct: null, source: "TASE Official API", isFallback: false, asOf: d ? `${d[3]}-${d[2]}-${d[1]}` : null };
     }
   } catch (e) { console.log(`    ⚠ TASE API ${id}: ${e.message}`); }
 
@@ -264,7 +268,8 @@ async function yahooPrice(ticker, fallbackTicker = null) {
       const src  = meta.regularMarketPrice != null ? "Yahoo Finance"
                  : meta.postMarketPrice    != null ? "Yahoo Finance (post-market)"
                  :                                   "Yahoo Finance (pre-market)";
-      return { price: cur, changePct: chg, currency: meta.currency || "USD", source: src, isFallback: false };
+      const asOf = meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : null;
+      return { price: cur, changePct: chg, currency: meta.currency || "USD", source: src, isFallback: false, asOf };
     }
   } catch (e) { console.log(`    ⚠ ${ticker}: ${e.message}`); }
   // fallback ticker
@@ -706,7 +711,7 @@ async function fetchExcellenceHistory(realPrices) {
 
   // ══ שלב 1: Core Assets — מחירים חיים ══════════════════════
   console.log("📡 שולף מחירים — MSTR · MSTY · IBIT · FX...");
-  const [msty, mstr, ibit, fx] = await Promise.all([
+  let [msty, mstr, ibit, fx] = await Promise.all([
     yahooPrice("MSTY"),
     yahooPrice("MSTR"),
     yahooPrice("IBIT"),
@@ -716,10 +721,36 @@ async function fetchExcellenceHistory(realPrices) {
   // ══ שלב 2: ניירות אקסלנס ת"א — V2.8.3: 4 מקורות (Yahoo→Investing.com→Stooq→Bizportal) ═
   // מחיר נשמר ב-Firestore ב-ILS (לא אגורות!) — האפליקציה משתמשת ישירות ב-₪
   console.log("\n📡 V2.8.3 — שולף ניירות TASE: 1183441 (S&P) · 1159243 (NASDAQ)...");
-  const [rawSp500, rawNasdaq] = await Promise.all([
+  let [rawSp500, rawNasdaq] = await Promise.all([
     tasePriceILS(1183441, "1183441.TA"),  // Invesco S&P 500 TASE
     tasePriceILS(1159243, "1159243.TA"),  // iShares NASDAQ 100 TASE
   ]);
+
+  // ══ V3.1 — בדיקת סבירות + נפילה לנתון האחרון הידוע (market_data/latest, לא "אתמול" הקלנדרי) ══
+  const prevLatest = await fsRead("market_data", "latest");
+  const sane = (o, prevPrice, label) => {
+    if (o.price != null && prevPrice > 0 && Math.abs(o.price / prevPrice - 1) > MAX_DAILY_MOVE) {
+      warnings.push(`${label}: ${o.price} חורג ביותר מ-${MAX_DAILY_MOVE * 100}% מהקודם (${prevPrice}) — לא נכתב, נשמר הקודם`);
+      o = { ...o, price: null };
+    }
+    if (o.price == null && prevPrice > 0) {
+      warnings.push(`${label}: לא זמין — נשמר מחיר הסריקה הקודמת (${prevLatest?.date || "?"})`);
+      return { ...o, price: prevPrice, changePct: null, isFallback: true, fallbackSource: "previous_day",
+               source: `סריקה קודמת (${prevLatest?.date || "?"})`, asOf: null };
+    }
+    return o;
+  };
+  msty = sane(msty, prevLatest?.msty?.price, "MSTY");
+  mstr = sane(mstr, prevLatest?.mstr?.price, "MSTR");
+  ibit = sane(ibit, prevLatest?.ibit?.price, "IBIT");
+  fx   = sane(fx,   prevLatest?.fx?.usdIls,  "USD/ILS");
+  // ניירות ת"א: רק דחיית קפיצה כאן — ה-fallback לנתון הקודם (עם isFallback) נבנה בשלב 5
+  for (const [o, prev, label] of [[rawSp500, prevLatest?.sp500?.price, "1183441"], [rawNasdaq, prevLatest?.nasdaq?.price, "1159243"]]) {
+    if (o.price != null && prev > 0 && Math.abs(o.price / prev - 1) > MAX_DAILY_MOVE) {
+      warnings.push(`${label}: ${o.price} חורג ביותר מ-${MAX_DAILY_MOVE * 100}% מהקודם (${prev}) — לא נכתב`);
+      o.price = null;
+    }
+  }
 
   // לוג מחירים — core assets
   const p = (o, label, sym) => console.log(`  ${label.padEnd(8)} ${o.price != null ? `${sym}${o.price} (${o.changePct != null ? (o.changePct >= 0 ? "+" : "") + o.changePct + "%" : "—"})` : "לא זמין"}`);
@@ -732,9 +763,9 @@ async function fetchExcellenceHistory(realPrices) {
   };
   pTA(rawSp500,  "1183441"); pTA(rawNasdaq, "1159243");
 
-  if (!msty.price)       warnings.push("MSTY: לא זמין");
-  if (!mstr.price)       warnings.push("MSTR: לא זמין");
-  if (!fx.price)         warnings.push("USD/ILS: לא זמין");
+  if (!msty.price)       warnings.push("MSTY: לא זמין (ואין נתון קודם)");
+  if (!mstr.price)       warnings.push("MSTR: לא זמין (ואין נתון קודם)");
+  if (!fx.price)         warnings.push("USD/ILS: לא זמין (ואין נתון קודם)");
   if (!rawSp500.price)   warnings.push("נייר 1183441 (S&P500 אקסלנס): חסום — יוצג מחיר יום קודם");
   if (!rawNasdaq.price)  warnings.push("נייר 1159243 (נאסד\"ק אקסלנס): חסום — יוצג מחיר יום קודם");
 
@@ -742,7 +773,7 @@ async function fetchExcellenceHistory(realPrices) {
   // רץ פעם בשבוע (יום שני) כדי לא להציף את הבאנר/מייל כל בוקר עם אותה תזכורת
   // הערה: כללי האבטחה של Firestore מאפשרים get() לפי מזהה אך חוסמים list() על
   // האוסף — לכן קוראים כל נכס בנפרד לפי המזהים הידועים מה-SEED (Dashboard.jsx).
-  if (IS_MONDAY) {
+  if (IS_MONDAY && !PRICES_ONLY) {
     try {
       const ASSET_IDS = ["1","2","3","4","5","6","7","7b","8","9","10","12","13"];
       const fetched = await Promise.all(ASSET_IDS.map(id => fsRead("families/mizrahi/assets", id)));
@@ -767,6 +798,7 @@ async function fetchExcellenceHistory(realPrices) {
   //   pensia-net resource 6d47d6b5… — קרנות פנסיה
   // גיבוי לגמל בלבד: tsuotHodXML.aspx (נקודת קצה לא מתועדת של האתר).
   // allowlist מפורש: לא מוסיפים trackCode בלי אימות מול הקטלוג (מונע "job ירוק עם נתונים שגויים").
+  if (!PRICES_ONLY) {
   console.log("\n🏦 V3.0.5 — שולף תשואות חודשיות (גמל-נט + פנסיה-נט, מקור: data.gov.il)...");
   try {
     const SOURCES = [
@@ -843,13 +875,14 @@ async function fetchExcellenceHistory(realPrices) {
     console.warn("  ⚠ תשואות חודשיות נכשל:", e.message);
     warnings.push(`תשואות חודשיות: ${e.message}`);
   }
+  } // !PRICES_ONLY
 
   // ══ שלב 2.7: V3.1 — קרן כספית (מאיה) + שער יציג (בנק ישראל) ══
   let funds = null, boiRate = null;
   console.log("\n🏦 V3.1 — קרן כספית 5127790 (מאיה) + שער יציג (בנק ישראל)...");
   try {
     const mmfAsset = await fsRead("families/mizrahi/assets", "10");
-    const prevMmf  = (await fsRead("market_data", "latest"))?.funds?.["5127790"];
+    const prevMmf  = prevLatest?.funds?.["5127790"];
     const mmf = await mayaFund(5127790, mmfAsset?.reportDate);
     if (!mmf) throw new Error("אין נתונים");
     // סבירות: קרן כספית לא זזה יותר מ-2% ביום
@@ -976,17 +1009,18 @@ async function fetchExcellenceHistory(realPrices) {
   else           console.log("  ℹ אין היסטוריה אתמול (ראשון פעם)");
 
   // V2.8.2: fallback — נתוני יום קודם ב-ILS (כבר מומרים, לא אגורות)
-  const sp500_prevPrice  = yesterday?.sp500?.price  ?? null; // כבר ILS
-  const nasdaq_prevPrice = yesterday?.nasdaq?.price ?? null; // כבר ILS
+  // V3.1: הנתון האחרון הידוע (market_data/latest) — "אתמול" הקלנדרי ריק בראשון/אחרי חג
+  const sp500_prevPrice  = prevLatest?.sp500?.price  ?? yesterday?.sp500?.price  ?? null; // כבר ILS
+  const nasdaq_prevPrice = prevLatest?.nasdaq?.price ?? yesterday?.nasdaq?.price ?? null; // כבר ILS
 
   const sp500 = rawSp500.price != null ? rawSp500 : {
     price: sp500_prevPrice, changePct: null, currency: "ILS",
-    source: sp500_prevPrice ? `יום קודם (${YESTERDAY})` : "unavailable",
+    source: sp500_prevPrice ? `סריקה קודמת (${prevLatest?.date || YESTERDAY})` : "unavailable",
     isFallback: !!sp500_prevPrice, fallbackSource: "previous_day",
   };
   const nasdaq = rawNasdaq.price != null ? rawNasdaq : {
     price: nasdaq_prevPrice, changePct: null, currency: "ILS",
-    source: nasdaq_prevPrice ? `יום קודם (${YESTERDAY})` : "unavailable",
+    source: nasdaq_prevPrice ? `סריקה קודמת (${prevLatest?.date || YESTERDAY})` : "unavailable",
     isFallback: !!nasdaq_prevPrice, fallbackSource: "previous_day",
   };
 
@@ -996,10 +1030,10 @@ async function fetchExcellenceHistory(realPrices) {
   if (rawNasdaq.price == null && !nasdaq_prevPrice) console.log("  ⚠ NASDAQ: אין נתונים בכלל — יוצג עלות בסיס");
 
   const dailyChg = {
-    msty:   calcDailyChange(msty.price,   yesterday?.msty?.price)   ?? msty.changePct,
-    mstr:   calcDailyChange(mstr.price,   yesterday?.mstr?.price)   ?? mstr.changePct,
-    ibit:   calcDailyChange(ibit.price,   yesterday?.ibit?.price)   ?? ibit.changePct,
-    fx:     calcDailyChange(fx.price,     yesterday?.fx?.usdIls)    ?? fx.changePct,
+    msty:   calcDailyChange(msty.isFallback ? null : msty.price,   yesterday?.msty?.price)   ?? msty.changePct,
+    mstr:   calcDailyChange(mstr.isFallback ? null : mstr.price,   yesterday?.mstr?.price)   ?? mstr.changePct,
+    ibit:   calcDailyChange(ibit.isFallback ? null : ibit.price,   yesterday?.ibit?.price)   ?? ibit.changePct,
+    fx:     calcDailyChange(fx.isFallback ? null : fx.price,     yesterday?.fx?.usdIls)    ?? fx.changePct,
     // sp500/nasdaq: שינוי יומי רק אם יש מחיר חי (fallback = null כי אין שינוי)
     sp500:  rawSp500.price  != null ? (calcDailyChange(sp500.price,  yesterday?.sp500?.price)  ?? sp500.changePct) : null,
     nasdaq: rawNasdaq.price != null ? (calcDailyChange(nasdaq.price, yesterday?.nasdaq?.price) ?? nasdaq.changePct) : null,
@@ -1008,7 +1042,7 @@ async function fetchExcellenceHistory(realPrices) {
   // ══ שלב 6: V2.8.0 — חדשות רלוונטיות: MSTY · MSTR · YieldMax ══
   // רק נושאים שמעניינים את המשתמש — לא BTC גנרי, לא IBIT כפול
   console.log("\n📰 V2.8.0 — שולף חדשות MSTY · MSTR · YieldMax...");
-  const [mstyNews, mstrNews, ibitNews] = await Promise.all([
+  const [mstyNews, mstrNews, ibitNews] = PRICES_ONLY ? [[], [], []] : await Promise.all([
     fetchRssHeadlines("MSTY",  2),   // MSTY ישירות מYahoo RSS
     fetchRssHeadlines("MSTR",  2),   // MicroStrategy
     fetchRssHeadlines("IBIT",  1),   // Bitcoin ETF (לא BTC גנרי)
@@ -1056,6 +1090,7 @@ async function fetchExcellenceHistory(realPrices) {
       changePct:          msty.changePct,
       dailyChangePct:     dailyChg.msty,
       priceSource:        msty.source,
+      priceAsOf:          msty.asOf ?? null,   // V3.1 — זמן המחיר בבורסה
       nextDividend,
       recentDividends,    // V2.6.1 — מערך מלא של 3 חודשים אחרונים (כל פעימות אפריל)
       projectedDividend,  // V2.5.2 — תחזית דיבידנד לפי מניות מ-Firestore
@@ -1065,12 +1100,14 @@ async function fetchExcellenceHistory(realPrices) {
       changePct:      mstr.changePct,
       dailyChangePct: dailyChg.mstr,
       priceSource:    mstr.source,
+      priceAsOf:      mstr.asOf ?? null,
     },
     ibit: {
       price:          ibit.price,
       changePct:      ibit.changePct,
       dailyChangePct: dailyChg.ibit,
       priceSource:    ibit.source,
+      priceAsOf:      ibit.asOf ?? null,
       currency:       "USD",
     },
     // V2.8.2: Excellence papers — מחיר ב-₪ (ILS) — tasePriceILS כבר המיר אגורות!
@@ -1081,6 +1118,7 @@ async function fetchExcellenceHistory(realPrices) {
       changePct:      sp500.changePct,
       dailyChangePct: dailyChg.sp500,
       priceSource:    sp500.source,
+      priceAsOf:      sp500.asOf ?? null,
       paperCode:      "01183441",
       isFallback:     !!sp500.isFallback,
       fallbackSource: sp500.fallbackSource || null,  // "previous_day" | null
@@ -1090,6 +1128,7 @@ async function fetchExcellenceHistory(realPrices) {
       changePct:      nasdaq.changePct,
       dailyChangePct: dailyChg.nasdaq,
       priceSource:    nasdaq.source,
+      priceAsOf:      nasdaq.asOf ?? null,
       paperCode:      "01159243",
       isFallback:     !!nasdaq.isFallback,
       fallbackSource: nasdaq.fallbackSource || null,
@@ -1099,11 +1138,13 @@ async function fetchExcellenceHistory(realPrices) {
       changePct:      fx.changePct,
       dailyChangePct: dailyChg.fx,
       source:         fx.source,
+      priceAsOf:      fx.asOf ?? null,
       boiRate:        boiRate?.rate ?? null,   // V3.1 — שער יציג בנק ישראל
       boiRateDate:    boiRate?.date ?? null,
     },
     funds,                                     // V3.1 — { "5127790": {price, asOf, priceAtReport, reportDate, mgmtFee} }
-    news:    allNews,
+    news:    PRICES_ONLY ? null : allNews, // V3.1 — ריצת מחירים לא דורסת את החדשות של הבוקר
+    scanMode: PRICES_ONLY ? "prices" : "full",
     warnings,
   };
 
@@ -1136,7 +1177,7 @@ async function fetchExcellenceHistory(realPrices) {
   ]);
 
   // ══ שלב 8.5: V2.9.8 — היסטוריית מחירים לאקסלנס (3 שנים, גרפים) ══
-  try {
+  if (!PRICES_ONLY) try {
     await fetchExcellenceHistory({ sp500: sp500.price, nasdaq: nasdaq.price });
   } catch (e) {
     console.warn("  ⚠ Excellence history נכשל:", e.message);
@@ -1144,10 +1185,15 @@ async function fetchExcellenceHistory(realPrices) {
 
   // ══ שלב 9: V2.9.3 — סורק תעלות ════════════════════════════
   let channelAlerts = [];
-  try {
+  if (!PRICES_ONLY) try {
     channelAlerts = await runChannelScan();
   } catch (e) {
     console.warn("  ⚠ סורק תעלות נכשל:", e.message);
+  }
+
+  if (PRICES_ONLY) {
+    console.log("\n✅ V3.1 — ריצת מחירים בלבד הושלמה (ללא וואטסאפ/מייל)");
+    return;
   }
 
   // ══ שלב 9: V2.9.0 — WhatsApp שבועי (יום שני בלבד) ══════════

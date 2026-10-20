@@ -3011,12 +3011,12 @@ function useLiveMarket() {
     // V2.7.0 — מיפוי כל המחירים מה-scanner לשימוש פנימי (כולל SP500/NASDAQ/IBIT לטאב אקסלנס)
     // הבר המחירים מציג רק MSTY/MSTR/FX (ב-LIVE_TRACKS) — זה בנפרד
     return {
-      MSTY:   md.msty?.price   != null ? { price: md.msty.price,   currency: "USD", label: "MSTY",                     flag: "📈", ticker: "MSTY",       source: md.msty.priceSource   || "Firestore (scanner)" } : null,
-      MSTR:   md.mstr?.price   != null ? { price: md.mstr.price,   currency: "USD", label: "MSTR",                     flag: "🟧", ticker: "MSTR",       source: md.mstr.priceSource   || "Firestore (scanner)" } : null,
-      IBIT:   md.ibit?.price   != null ? { price: md.ibit.price,   currency: "USD", label: "Bitcoin ETF (IBIT)",       flag: "₿",  ticker: "IBIT",       source: md.ibit.priceSource   || "Firestore (scanner)" } : null,
-      SP500:  md.sp500?.price  != null ? { price: md.sp500.price,  currency: "ILS", label: "אקסלנס S&P 500 (1183441)", flag: "🇺🇸", ticker: "1183441.TA", source: md.sp500.priceSource  || "Firestore (scanner)", isFallback: !!md.sp500.isFallback,  fallbackSource: md.sp500.fallbackSource  || null } : null,
-      NASDAQ: md.nasdaq?.price != null ? { price: md.nasdaq.price, currency: "ILS", label: "אקסלנס נאסד\"ק (1159243)", flag: "💻", ticker: "1159243.TA", source: md.nasdaq.priceSource || "Firestore (scanner)", isFallback: !!md.nasdaq.isFallback, fallbackSource: md.nasdaq.fallbackSource || null } : null,
-      FX:     fxRate           != null ? { price: fxRate,          currency: "FX",  label: "USD/ILS",                  flag: "💱", ticker: "ILS=X",      source: md.fx.source          || "Firestore (scanner)" } : null,
+      MSTY:   md.msty?.price   != null ? { price: md.msty.price,   currency: "USD", label: "MSTY",                     flag: "📈", ticker: "MSTY",       source: md.msty.priceSource   || "Firestore (scanner)", asOf: md.msty.priceAsOf || null } : null,
+      MSTR:   md.mstr?.price   != null ? { price: md.mstr.price,   currency: "USD", label: "MSTR",                     flag: "🟧", ticker: "MSTR",       source: md.mstr.priceSource   || "Firestore (scanner)", asOf: md.mstr.priceAsOf || null } : null,
+      IBIT:   md.ibit?.price   != null ? { price: md.ibit.price,   currency: "USD", label: "Bitcoin ETF (IBIT)",       flag: "₿",  ticker: "IBIT",       source: md.ibit.priceSource   || "Firestore (scanner)", asOf: md.ibit.priceAsOf || null } : null,
+      SP500:  md.sp500?.price  != null ? { price: md.sp500.price,  currency: "ILS", label: "אקסלנס S&P 500 (1183441)", flag: "🇺🇸", ticker: "1183441.TA", source: md.sp500.priceSource  || "Firestore (scanner)", isFallback: !!md.sp500.isFallback,  fallbackSource: md.sp500.fallbackSource  || null, asOf: md.sp500.priceAsOf || null } : null,
+      NASDAQ: md.nasdaq?.price != null ? { price: md.nasdaq.price, currency: "ILS", label: "אקסלנס נאסד\"ק (1159243)", flag: "💻", ticker: "1159243.TA", source: md.nasdaq.priceSource || "Firestore (scanner)", isFallback: !!md.nasdaq.isFallback, fallbackSource: md.nasdaq.fallbackSource || null, asOf: md.nasdaq.priceAsOf || null } : null,
+      FX:     fxRate           != null ? { price: fxRate,          currency: "FX",  label: "USD/ILS",                  flag: "💱", ticker: "ILS=X",      source: md.fx.source          || "Firestore (scanner)", asOf: md.fx.priceAsOf || null } : null,
     };
   }, []);
 
@@ -3173,6 +3173,14 @@ const LiveMarketBar = ({ prices, fetchedAt, fetching, ghTrigger, onRefresh, stal
             ) : null}
             {isStale && (
               <span className="text-[9px] text-slate-500" title="נתון מהסריקה האחרונה — לא עדכני כרגע">🕐</span>
+            )}
+            {/* V3.1 — מתי המחיר נקבע בבורסה (לא מתי רץ הסורק) */}
+            {!isStale && t.asOf && (
+              <span className="text-[9px] text-slate-500 font-mono" title={`מחיר נכון ל-${new Date(t.asOf).toLocaleString("he-IL")} · מקור: ${t.source || ""}`}>
+                {t.asOf.length > 10
+                  ? new Date(t.asOf).toLocaleString("he-IL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+                  : t.asOf.slice(8, 10) + "/" + t.asOf.slice(5, 7)}
+              </span>
             )}
             {isFallback && (
               <span className="text-[9px] text-amber-500" title="מדד US (fallback)">~</span>
@@ -4634,7 +4642,7 @@ export default function HaMatzpanGemelnet() {
       }
       return prev;
     });
-  }, [liveMarket.MSTY?.price]);
+  }, [liveMarket.MSTY?.price, settingsReady]); // V3.1 — גם אחרי טעינת ההגדרות (שלא ידרסו מחיר חי בשמור ישן)
 
   useEffect(() => {
     if (!liveMarket.FX?.price) return;
@@ -4644,7 +4652,7 @@ export default function HaMatzpanGemelnet() {
       }
       return prev;
     });
-  }, [liveMarket.FX?.price]);
+  }, [liveMarket.FX?.price, settingsReady]);
 
   // ═══ V2.1.9 · Cloud Sync — Firestore עם עדיפות על localStorage ═══
   useEffect(() => {
