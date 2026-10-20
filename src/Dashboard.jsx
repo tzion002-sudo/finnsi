@@ -624,7 +624,7 @@ const SourceBadge = ({ source, confirmed }) => {
   );
 };
 
-const AssetRow = ({ a, onSpotCheck, fundReturns, fundPrice }) => {
+const AssetRow = ({ a, onSpotCheck, fundReturns, fundPrice, linkedLoan }) => {
   const hasGemel = a.monthlyReturnFromGemelnet != null;
   // V3.0 — אומדן יתרה בין דוחות PDF, מבוסס תשואות גמל-נט (תצוגה בלבד — לא נכתב ל-DB)
   const estimate = useMemo(
@@ -694,7 +694,10 @@ const AssetRow = ({ a, onSpotCheck, fundReturns, fundPrice }) => {
       {a.pensionLoan && (
         <div className="flex items-center gap-1.5 text-[11px] bg-amber-900/25 border border-amber-600/50 rounded-lg px-2.5 py-1.5 mb-2 text-amber-200 font-semibold">
           <AlertCircle size={12} className="text-amber-400 flex-shrink-0"/>
-          ⚠️ הלוואה פעילה נגד פנסיה — ₪{a.pensionLoan.amount?.toLocaleString("he-IL")} · {a.pensionLoan.monthlyPayment} ₪/חודש · מטרה: {a.pensionLoan.purpose}
+          {/* V3.1 — יתרה ותשלום מההלוואה המקושרת בלשונית ההלוואות (מקור האמת); בלעדיה — הנתון הקבוע בנכס */}
+          ⚠️ הלוואה פעילה נגד פנסיה — {linkedLoan
+            ? <>יתרה {fmt(linkedLoan.currentBalance)} מתוך ₪{(linkedLoan.originalAmount || a.pensionLoan.amount)?.toLocaleString("he-IL")} · {linkedLoan.monthlyPayment} ₪/חודש</>
+            : <>₪{a.pensionLoan.amount?.toLocaleString("he-IL")} · {a.pensionLoan.monthlyPayment} ₪/חודש</>} · מטרה: {a.pensionLoan.purpose}
         </div>
       )}
       {/* V2.2.1 — permanentNote is a code-owned policy field, displayed independently */}
@@ -5574,7 +5577,7 @@ export default function HaMatzpanGemelnet() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {list.map(a => (
                       <div key={a.id}>
-                        <AssetRow a={a} onSpotCheck={setSpotAsset} fundReturns={fundReturnsByTrack[a.trackCode]} fundPrice={liveFunds?.[a.trackCode]}/>
+                        <AssetRow a={a} onSpotCheck={setSpotAsset} fundReturns={fundReturnsByTrack[a.trackCode]} fundPrice={liveFunds?.[a.trackCode]} linkedLoan={a.pensionLoan ? loans.find(l => l.linkedMSTY) : null}/>
                         {isKid && <CompoundProjection asset={a}/>}
                       </div>
                     ))}
