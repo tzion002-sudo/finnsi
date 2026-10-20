@@ -786,7 +786,7 @@ async function fetchExcellenceHistory(realPrices) {
       });
       staleFunds.forEach(a => {
         const days = Math.round((now - new Date(a.checkDate).getTime()) / 86400000);
-        warnings.push(`📋 ${a.owner} · ${a.type}: דוח אחרון לפני ${days} יום (${a.checkDate}) — כדאי להעלות דוח מעודכן`);
+        warnings.push(`📋 ${a.owner} · ${a.type}: דוח אחרון לפני ${days} יום (${a.checkDate}) — כדאי להעלות דוח מעודכן (או דוח מסלקה מרוכז: swiftness.co.il)`);
       });
       if (staleFunds.length) console.log(`  📋 ${staleFunds.length} קופות עם דוח ישן מ-100 יום`);
     } catch (e) { console.warn("  ⚠ בדיקת דוחות ישנים נכשלה:", e.message); }

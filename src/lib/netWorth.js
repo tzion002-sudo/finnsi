@@ -80,3 +80,41 @@ export function rateOn(fxByDate, date) {
   const prev = Object.keys(fxByDate).filter(d => d < date).sort().at(-1);
   return prev ? fxByDate[prev] : null;
 }
+
+/**
+ * כיול: כמה האומדן טעה מול דוח רשמי חדש. מחושב לפני שהיתרה החדשה דורסת את הישנה.
+ * משווה רק כשיש תשואות רשמיות עד חודש הדוח החדש (סוף חודש) או עד החודש שלפניו.
+ * @returns {{pct:number, estimated:number, actual:number, date:string} | null}
+ */
+export function estimateDeviation(asset, fundReturnsDoc, actualBalance, actualDate) {
+  if (!actualBalance || !actualDate || !asset?.reportDate || actualDate <= asset.reportDate) return null;
+  const [y, m, d] = actualDate.split("-").map(Number);
+  const endYm = actualDate.slice(0, 7);
+  const lastFullYm = d === new Date(y, m, 0).getDate() ? endYm
+    : `${m === 1 ? y - 1 : y}-${String(m === 1 ? 12 : m - 1).padStart(2, "0")}`;
+  const monthly = (fundReturnsDoc?.monthly || []).filter(r => r.ym <= lastFullYm);
+  const est = estimateBalance(asset, { monthly });
+  if (!est || est.throughYm < lastFullYm) return null; // חסרים חודשים — השוואה לא הוגנת
+  return {
+    pct: Math.round((est.estimatedBalance - actualBalance) / actualBalance * 10000) / 100,
+    estimated: est.estimatedBalance, actual: actualBalance, date: actualDate,
+  };
+}
+
+/** צילום יומי של שווי נטו: מעדכן/מוסיף את רשומת היום, שומר עד max ימים. מחזיר null אם אין שינוי. */
+export function upsertDailySnapshot(history = [], entry, max = 730) {
+  const last = history.at(-1);
+  if (last?.date === entry.date && Math.abs(last.netWorth - entry.netWorth) < 1) return null;
+  const next = last?.date === entry.date ? [...history.slice(0, -1), entry] : [...history, entry];
+  return next.slice(-max);
+}
+
+/** קפיצות חשודות בין ימים עוקבים (ברירת מחדל: מעל 5%) */
+export function findJumps(history = [], threshold = 0.05) {
+  const jumps = [];
+  for (let i = 1; i < history.length; i++) {
+    const prev = history[i - 1].netWorth, cur = history[i].netWorth;
+    if (prev && Math.abs(cur / prev - 1) > threshold) jumps.push({ date: history[i].date, from: prev, to: cur, pct: Math.round((cur / prev - 1) * 1000) / 10 });
+  }
+  return jumps;
+}

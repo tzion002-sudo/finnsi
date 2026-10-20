@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { estimateBalance } from "./fundEstimate.js";
-import { assetValue, loanBalance, computeTotals, fundPriceValue, rateOn } from "./netWorth.js";
+import { assetValue, loanBalance, computeTotals, fundPriceValue, rateOn, estimateDeviation, upsertDailySnapshot, findJumps } from "./netWorth.js";
 
 // תשואות רשמיות מסלול 456 (data.gov.il, נשלף 20.10.2026)
 const RET_456 = { monthly: [
@@ -103,5 +103,37 @@ describe("rateOn (שער יציג לפי תאריך)", () => {
     expect(rateOn(fx, "2026-10-04")).toBe(3.06);
     expect(rateOn(fx, "2026-09-01")).toBeNull();
     expect(rateOn(null, "2026-10-02")).toBeNull();
+  });
+});
+
+describe("estimateDeviation (כיול מול דוח חדש)", () => {
+  it("7b: אומדן מול דוח כלל 30.06.2026 → סטייה ~1.35%", () => {
+    const dev = estimateDeviation(ZIV_7B, RET_456, 168266, "2026-06-30");
+    expect(dev.pct).toBeCloseTo(1.35, 1);
+    expect(dev.actual).toBe(168266);
+  });
+  it("דוח באמצע חודש: משווה עד סוף החודש הקודם", () => {
+    const dev = estimateDeviation(ZIV_7B, RET_456, 168000, "2026-06-15");
+    expect(dev).not.toBeNull(); // תשואות עד מאי קיימות
+  });
+  it("null כשאין תשואות עד חודש הדוח / דוח ישן יותר", () => {
+    expect(estimateDeviation(ZIV_7B, RET_456, 170000, "2026-09-30")).toBeNull();
+    expect(estimateDeviation(ZIV_7B, RET_456, 160000, "2026-03-31")).toBeNull();
+  });
+});
+
+describe("צילום שווי נטו יומי", () => {
+  it("מוסיף יום חדש, מעדכן את אותו יום, מתעלם משינוי זניח", () => {
+    const h1 = upsertDailySnapshot([], { date: "2026-10-19", netWorth: 1000 });
+    expect(h1).toHaveLength(1);
+    const h2 = upsertDailySnapshot(h1, { date: "2026-10-20", netWorth: 1010 });
+    expect(h2).toHaveLength(2);
+    expect(upsertDailySnapshot(h2, { date: "2026-10-20", netWorth: 1010.4 })).toBeNull();
+    expect(upsertDailySnapshot(h2, { date: "2026-10-20", netWorth: 1050 }).at(-1).netWorth).toBe(1050);
+    expect(upsertDailySnapshot(h2, { date: "2026-10-21", netWorth: 1 }, 2)).toHaveLength(2);
+  });
+  it("findJumps מסמן קפיצה מעל 5%", () => {
+    const j = findJumps([{ date: "a", netWorth: 1000 }, { date: "b", netWorth: 1030 }, { date: "c", netWorth: 1200 }]);
+    expect(j).toEqual([{ date: "c", from: 1030, to: 1200, pct: 16.5 }]);
   });
 });

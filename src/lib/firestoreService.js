@@ -230,6 +230,7 @@ export async function saveSettings(settings) {
     Array.isArray(settings.excellenceLongTerm)   ||
     Array.isArray(settings.excellenceTradeJournal)||
     Array.isArray(settings.mstyDividends)        ||
+    Array.isArray(settings.networthHistory)      ||   // V3.1 — צילום יומי (נשמר לבד, merge)
     typeof settings.mstyPrice === "number"       ||
     typeof settings.githubPat === "string";
 

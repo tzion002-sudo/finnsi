@@ -7,7 +7,7 @@ import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, s
          subscribePriceHistory, subscribeToMstyDividends, subscribeFundReturns } from './lib/firestoreService';
 import { reconcileDividends } from './lib/dividendSync';
 import { estimateBalance, isGemelnetEligible, GEMELNET_ELIGIBLE_TRACKS } from './lib/fundEstimate';
-import { computeTotals, loanBalance, fundPriceValue, rateOn } from './lib/netWorth';
+import { computeTotals, loanBalance, fundPriceValue, rateOn, estimateDeviation, upsertDailySnapshot, findJumps } from './lib/netWorth';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -883,7 +883,7 @@ const SuccessModal = ({ result, onClose, onConfirmFirestore }) => {
 // ══════════════════════════════════════════════════════════════
 //  PERFORMANCE TAB — גרף ביצועים היסטורי
 // ══════════════════════════════════════════════════════════════
-const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
+const PerformanceTab = ({ assets: rawAssets, fundReturns = {}, networthHistory = [] }) => {
   // ── Fund history (quarterly reports) ──────────────────────────
   const [fundHistory,     setFundHistory]     = useState([]);
   const [historyOwner,    setHistoryOwner]    = useState('כולם');
@@ -1016,6 +1016,7 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
               <th className="py-1 px-2 font-medium">עדכון</th>
               <th className="py-1 px-2 font-medium">נתון חודשי אחרון</th>
               <th className="py-1 px-2 font-medium">דוח רשמי</th>
+              <th className="py-1 px-2 font-medium" title="כמה האומדן טעה מול הדוח האחרון שהועלה">סטיית אומדן</th>
             </tr>
           </thead>
           <tbody>
@@ -1033,6 +1034,11 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
                   </td>
                   <td className="py-1 px-2 text-slate-300 font-mono">{last || "—"}</td>
                   <td className="py-1 px-2 text-slate-400">{a.reportDate ? fmtDate(a.reportDate) : "—"}</td>
+                  <td className="py-1 px-2 font-mono" title={a.estimateCheck ? `אומדן ${fmt(a.estimateCheck.estimated)} מול דוח ${fmt(a.estimateCheck.actual)} (${fmtDate(a.estimateCheck.date)})` : "יימדד בהעלאת הדוח הבא"}>
+                    {a.estimateCheck
+                      ? <span className={Math.abs(a.estimateCheck.pct) > 2 ? "text-amber-400" : "text-emerald-400"}>{a.estimateCheck.pct > 0 ? "+" : ""}{a.estimateCheck.pct}%</span>
+                      : <span className="text-slate-600">—</span>}
+                  </td>
                 </tr>
               );
             })}
@@ -1041,7 +1047,25 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
       </div>
       <p className="text-[11px] text-slate-500 mt-2">
         נתוני גמל/פנסיה מתפרסמים ברשות שוק ההון כ-2–6 שבועות אחרי סוף החודש, ולכן הנתון האחרון הוא תמיד החודש שפורסם.
+        לכיול רבעוני מול כל הקופות: <a href="https://www.swiftness.co.il/" target="_blank" rel="noreferrer" className="text-cyan-400 underline">דוח המסלקה הפנסיונית</a> — והעלאתו במחסן הדוחות.
       </p>
+      {/* V3.1 — צילום שווי נטו יומי + קפיצות חשודות */}
+      {networthHistory.length > 1 && (
+        <div className="mt-4">
+          <p className="text-xs text-slate-300 mb-1">שווי נטו יומי ({networthHistory.length} ימים)</p>
+          <ResponsiveContainer width="100%" height={120}>
+            <LineChart data={networthHistory}>
+              <XAxis dataKey="date" hide/>
+              <YAxis hide domain={["auto", "auto"]}/>
+              <Tooltip formatter={v => fmt(v)} labelFormatter={fmtDate} contentStyle={{background:"#1e293b", border:"1px solid #334155", borderRadius:8}}/>
+              <Line type="monotone" dataKey="netWorth" stroke="#34d399" dot={false} strokeWidth={2}/>
+            </LineChart>
+          </ResponsiveContainer>
+          {findJumps(networthHistory).slice(-3).map(j => (
+            <p key={j.date} className="text-[11px] text-amber-400">⚠️ קפיצה של {j.pct}% ב-{fmtDate(j.date)} ({fmt(j.from)} → {fmt(j.to)}) — כדאי לבדוק</p>
+          ))}
+        </div>
+      )}
     </details>
   );
 
@@ -1224,7 +1248,7 @@ const PerformanceTab = ({ assets: rawAssets, fundReturns = {} }) => {
             <Legend wrapperStyle={{fontSize:11}}/>
             {tracksWithSeries.map(a => (
               <Line
-                key={a.trackCode}
+                key={a.id}
                 type="monotone"
                 dataKey={`#${a.trackCode}`}
                 name={`${a.owner} · ${a.type} (${a.trackCode})`}
@@ -3241,7 +3265,7 @@ function matchFundToAsset(parsed, assets) {
 //  DOCUMENTS TAB — V2.1.7 · מחסן דוחות רבעוניים
 //  PDF upload → זיהוי תאריך + יתרה → עדכון קופה עם source:"pdf_report"
 // ══════════════════════════════════════════════════════════════
-const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast }) => {
+const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast, fundReturns = {} }) => {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [selectedDoc, setSelectedDoc] = useState(null);
@@ -3322,6 +3346,10 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
 
       // ── עדכון יתרה נוכחית ─────────────────────────────────────
       if (assetId && scanResult.balance != null) {
+        // V3.1 — כיול: סטיית האומדן מול הדוח החדש (לפני שהיתרה נדרסת)
+        const estimateCheck = assetToUpdate && isGemelnetEligible(assetToUpdate)
+          ? estimateDeviation(assetToUpdate, fundReturns[assetToUpdate.trackCode], scanResult.balance, scanResult.reportDate) : null;
+        const calib = estimateCheck ? { estimateCheck } : {};
         setAssets(prev => prev.map(a => a.id !== assetId ? a : {
           ...a,
           reportBalance:    scanResult.balance,
@@ -3329,10 +3357,11 @@ const DocumentsTab = ({ documents, setDocuments, assets, setAssets, setSaveToast
           checkDate:        scanResult.reportDate,
           source:           "pdf_report",
           _reportConfirmed: true,
+          ...calib,
         }));
         if (assetToUpdate) {
           await saveAsset({ ...assetToUpdate, reportBalance: scanResult.balance,
-            reportDate: scanResult.reportDate, source: "pdf_report" });
+            reportDate: scanResult.reportDate, source: "pdf_report", ...calib });
         }
         setSaveToast(`📄 ${assetName}: יתרה ${fmt(scanResult.balance)} עודכנה ✅`);
       } else {
@@ -4593,6 +4622,7 @@ export default function HaMatzpanGemelnet() {
   const [serverDividends, setServerDividends]   = useState(null); // market_data/msty_dividends
   const [deletedDividends, setDeletedDividends] = useState([]);   // tombstones — מחיקות ידניות
   const [settingsReady, setSettingsReady]       = useState(false); // מונע reconcile מול SEED לפני hydration
+  const [networthHistory, setNetworthHistory]   = useState([]);    // V3.1 — צילום שווי נטו יומי
   const [mstyFX, setMstyFX]               = useState(MSTY_DEFAULTS.currentFX);
   const [mstyPrice, setMstyPrice]         = useState(MSTY_DEFAULTS.currentPrice);
   const [lastScan, setLastScan]           = useState(null);
@@ -4729,6 +4759,7 @@ export default function HaMatzpanGemelnet() {
           if (Array.isArray(s.excellenceLongTerm))     setExcellenceLongTerm(s.excellenceLongTerm);
           if (Array.isArray(s.excellenceTradeJournal)) setExcellenceTradeJournal(s.excellenceTradeJournal);
           if (typeof s.fireTarget === "number" && s.fireTarget > 0) setFireTarget(s.fireTarget);
+          if (Array.isArray(s.networthHistory))        setNetworthHistory(s.networthHistory);
           // מסמן hydrated רק כשיש נתונים אמיתיים
           settingsHydratedRef.current = true;
           setSettingsReady(true); // V3.0 — משחרר את סנכרון הדיבידנדים
@@ -5130,6 +5161,21 @@ export default function HaMatzpanGemelnet() {
     [assets, loans, mstyPrice, mstyFX, fundReturnsByTrack, liveFunds]
   );
 
+  // V3.1 — צילום שווי נטו יומי (שדה נפרד ב-settings, merge — לא נוגע בשאר השדות).
+  // ממתין 15 שניות אחרי שינוי כדי שהתשואות והמחירים ייטענו ולא יירשם ערך חלקי.
+  useEffect(() => {
+    if (!settingsReady || !assets.length || !totals.netWorth) return;
+    const t = setTimeout(() => {
+      const next = upsertDailySnapshot(networthHistory, {
+        date: today(), netWorth: Math.round(totals.netWorth), total: Math.round(totals.total), official: Math.round(totals.officialTotal),
+      });
+      if (!next) return;
+      setNetworthHistory(next);
+      saveSettings({ networthHistory: next }).catch(e => console.warn("networthHistory save failed:", e));
+    }, 15000);
+    return () => clearTimeout(t);
+  }, [settingsReady, assets.length, totals, networthHistory]);
+
   const handleFileUpload = async (e) => {
     setUploadError(null);
     const file = e.target.files?.[0];
@@ -5230,7 +5276,11 @@ export default function HaMatzpanGemelnet() {
   // V2.1.9 — Super-Persistence + Firestore Immediate Save
   const handleSpotCheck = (id, balance, date) => {
     const baseAsset = assets.find(a => a.id === id) || {};
-    const updated = { ...baseAsset, id, reportBalance: balance, reportDate: date, checkDate: date, source: "manual_truth", _manualLock: true };
+    // V3.1 — כיול: כמה האומדן הקודם טעה מול היתרה החדשה (לפני שהיא דורסת)
+    const estimateCheck = isGemelnetEligible(baseAsset)
+      ? estimateDeviation(baseAsset, fundReturnsByTrack[baseAsset.trackCode], balance, date) : null;
+    const updated = { ...baseAsset, id, reportBalance: balance, reportDate: date, checkDate: date, source: "manual_truth", _manualLock: true,
+      ...(estimateCheck ? { estimateCheck } : {}) };
     setAssets(prev => prev.map(a => a.id === id ? updated : a));
     setSpotAsset(null);
     setSaveToast("🔒 הנתון ננעל ונשמר בענן ✅");
@@ -5535,7 +5585,7 @@ export default function HaMatzpanGemelnet() {
         </>
       )}
 
-      {tab === "performance" && <PerformanceTab assets={assets} fundReturns={fundReturnsByTrack}/>}
+      {tab === "performance" && <PerformanceTab assets={assets} fundReturns={fundReturnsByTrack} networthHistory={networthHistory}/>}
       {tab === "excellence"  && <ExcellenceTab
                                   longTerm={excellenceLongTerm}
                                   setLongTerm={setExcellenceLongTerm}
@@ -5566,6 +5616,7 @@ export default function HaMatzpanGemelnet() {
           assets={assets}
           setAssets={setAssets}
           setSaveToast={setSaveToast}
+          fundReturns={fundReturnsByTrack}
         />
       )}
 
