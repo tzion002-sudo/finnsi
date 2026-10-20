@@ -9,14 +9,26 @@
 import { estimateBalance, isGemelnetEligible } from "./fundEstimate.js";
 
 /**
+ * קרן נאמנות (קרן כספית): יתרה = יתרת הדוח × מחיר היום / מחיר ביום הדוח.
+ * העוגן תקף רק אם הסורק חישב אותו לאותו reportDate (אחרי העלאת דוח חדש — ממתינים לסריקה).
+ * @param {{price:number, priceAtReport:number, reportDate:string, asOf:string}} fp — market_data/latest.funds[id]
+ */
+export function fundPriceValue(asset, fp) {
+  if (!asset?.reportBalance || !fp?.price || !fp?.priceAtReport || fp.reportDate !== asset.reportDate) return null;
+  return { value: Math.round(asset.reportBalance * fp.price / fp.priceAtReport * 100) / 100, kind: "market", asOf: fp.asOf };
+}
+
+/**
  * @param {object} asset
- * @param {{mstyPrice?:number, fx?:number, fundReturnsByTrack?:object}} ctx
+ * @param {{mstyPrice?:number, fx?:number, fundReturnsByTrack?:object, fundPrices?:object}} ctx
  * @returns {{value:number, kind:"market"|"estimate"|"official", asOf:string|null}}
  */
 export function assetValue(asset, ctx = {}) {
   if (asset?.isMSTY) {
     return { value: (asset.sharesCount || 0) * (ctx.mstyPrice || 0) * (ctx.fx || 0), kind: "market", asOf: null };
   }
+  const fp = fundPriceValue(asset, ctx.fundPrices?.[asset?.trackCode]);
+  if (fp) return fp;
   if (isGemelnetEligible(asset)) {
     const est = estimateBalance(asset, ctx.fundReturnsByTrack?.[asset.trackCode]);
     if (est) return { value: est.estimatedBalance, kind: "estimate", asOf: est.throughYm };
@@ -59,4 +71,12 @@ export function computeTotals(assets = [], loans = [], ctx = {}) {
   // ההלוואות: היתרה הידנית היא מקור האמת (ההלוואה נגד הפנסיה שימשה לקניית MSTY)
   const loansBalance = loans.reduce((s, l) => s + (l.currentBalance || 0), 0);
   return { total, officialTotal, estimatedCount, oldestYm, byOwner, byCat, loansBalance, netWorth: total - loansBalance };
+}
+
+/** שער יציג לתאריך: אותו יום, או יום המסחר האחרון לפניו (סופ"ש/חג). null אם אין. */
+export function rateOn(fxByDate, date) {
+  if (!fxByDate || !date) return null;
+  if (fxByDate[date] != null) return fxByDate[date];
+  const prev = Object.keys(fxByDate).filter(d => d < date).sort().at(-1);
+  return prev ? fxByDate[prev] : null;
 }

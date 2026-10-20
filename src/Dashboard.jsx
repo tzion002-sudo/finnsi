@@ -7,7 +7,7 @@ import { saveAsset, saveAllAssets, subscribeToAssets, initFamily, getSettings, s
          subscribePriceHistory, subscribeToMstyDividends, subscribeFundReturns } from './lib/firestoreService';
 import { reconcileDividends } from './lib/dividendSync';
 import { estimateBalance, isGemelnetEligible, GEMELNET_ELIGIBLE_TRACKS } from './lib/fundEstimate';
-import { computeTotals, loanBalance } from './lib/netWorth';
+import { computeTotals, loanBalance, fundPriceValue, rateOn } from './lib/netWorth';
 import { isFirebaseReady } from './lib/firebase';
 import * as XLSX from "xlsx";
 import {
@@ -624,13 +624,14 @@ const SourceBadge = ({ source, confirmed }) => {
   );
 };
 
-const AssetRow = ({ a, onSpotCheck, fundReturns }) => {
+const AssetRow = ({ a, onSpotCheck, fundReturns, fundPrice }) => {
   const hasGemel = a.monthlyReturnFromGemelnet != null;
   // V3.0 — אומדן יתרה בין דוחות PDF, מבוסס תשואות גמל-נט (תצוגה בלבד — לא נכתב ל-DB)
   const estimate = useMemo(
     () => (isGemelnetEligible(a) ? estimateBalance(a, fundReturns) : null),
     [a, fundReturns]
   );
+  const priced = useMemo(() => fundPriceValue(a, fundPrice), [a, fundPrice]); // V3.1 — קרן כספית לפי מחיר יחידה
   return (
     <div className="bg-slate-800/50 border border-slate-700 rounded-2xl p-4 sm:p-4 hover:border-slate-600 transition-colors shadow-sm hover:shadow-md">
       <div className="flex items-start justify-between gap-3 mb-2">
@@ -658,6 +659,11 @@ const AssetRow = ({ a, onSpotCheck, fundReturns }) => {
           {estimate && (
             <p className="text-[11px] text-cyan-400 font-mono mt-0.5" title={`אומדן — יתרת הדוח + תשואה רשמית עד ${estimate.throughYm} (${estimate.monthsApplied} חודשים) + הפקדות − דמי ניהול · הדוח הרשמי לא משתנה עד העלאת PDF חדש`}>
               🔮 {fmt(estimate.estimatedBalance)} <span className="text-slate-500">אומדן·{estimate.throughYm}</span>
+            </p>
+          )}
+          {priced && (
+            <p className="text-[11px] text-emerald-400 font-mono mt-0.5" title={`יתרת הדוח × מחיר יחידה היום / מחיר ביום הדוח (מאיה, נכון ל-${fmtDate(priced.asOf)})`}>
+              📈 {fmt(priced.value)} <span className="text-slate-500">לפי מחיר·{fmtDate(priced.asOf)}</span>
             </p>
           )}
         </div>
@@ -1735,7 +1741,7 @@ const MonthlyAccordion = ({ enriched, dividends, taxRate, fx, loanMonthly, updat
       const gross     = confirmedOnly.reduce((s,d) => s + d.grossUSD, 0);
       const net       = confirmedOnly.reduce((s,d) => s + d.netUSD, 0);
       const tax       = gross - net;
-      const netILS    = net * fx;
+      const netILS    = confirmedOnly.reduce((s,d) => s + d.netILS, 0); // V3.1 — שער היסטורי לכל חלוקה
       const coverage  = netILS / loanMonthly;
       const hasEstimates = items.some(d => d.isEstimate);
       const [y, m]    = ym.split("-").map(Number);
@@ -1906,7 +1912,7 @@ function d_notes_for_month(items) {
   );
 }
 
-const MSTYTab = ({ msty, dividends, setDividends, fx, setFx, currentPrice, setCurrentPrice, onDeleteDividend }) => {
+const MSTYTab = ({ msty, dividends, fxByDate, setDividends, fx, setFx, currentPrice, setCurrentPrice, onDeleteDividend }) => {
   const [newDivDate, setNewDivDate] = useState("");
   const [newDivAmount, setNewDivAmount] = useState("");
   const [taxRate, setTaxRate] = useState(msty?.taxRate ?? 0.25);
@@ -1932,30 +1938,32 @@ const MSTYTab = ({ msty, dividends, setDividends, fx, setFx, currentPrice, setCu
    *  דיבידנדי "צפי" עתידיים מסומנים ב-isEstimate:true ואינם נצברים ב-cumGross/cumNet — כדי למנוע "הזיות" ב-ROI. */
   const enriched = useMemo(() => {
     const sorted = [...dividends].sort((a,b) => new Date(a.date) - new Date(b.date));
-    let cumGross = 0, cumNet = 0;
+    let cumGross = 0, cumNet = 0, cumNetILS = 0;
     return sorted.map(d => {
       const shares = sharesAtDate(d.date, originalSh, splitDate, splitRatio);
       const grossUSD = d.amount * shares;
       const taxUSD = grossUSD * taxRate;
       const netUSD = grossUSD - taxUSD;
-      const netILS = netUSD * fx;
+      // V3.1 — שער יציג ביום החלוקה (בנק ישראל); עתידי/חסר → השער הנוכחי
+      const fxUsed = rateOn(fxByDate, d.date) ?? fx;
+      const netILS = netUSD * fxUsed;
       const estimate = isFutureEstimate(d);
-      if (!estimate) { cumGross += grossUSD; cumNet += netUSD; }
+      if (!estimate) { cumGross += grossUSD; cumNet += netUSD; cumNetILS += netILS; }
       return {
         ...d,
         isEstimate: estimate,
-        shares, grossUSD, taxUSD, netUSD, netILS,
-        cumGross, cumNet, cumNetILS: cumNet * fx,
+        shares, grossUSD, taxUSD, netUSD, netILS, fxUsed,
+        cumGross, cumNet, cumNetILS,
       };
     });
-  }, [dividends, fx, taxRate, originalSh, splitDate, splitRatio]);
+  }, [dividends, fx, fxByDate, taxRate, originalSh, splitDate, splitRatio]);
 
   /** חישובי סיכום — רק על דיבידנדים מאושרים (ללא צפי עתידי) */
   const summary = useMemo(() => {
     const confirmed = enriched.filter(d => !d.isEstimate);
     const totalGross = confirmed.reduce((s,d) => s + d.grossUSD, 0);
     const totalNet   = confirmed.reduce((s,d) => s + d.netUSD, 0);
-    const totalNetILS = totalNet * fx;
+    const totalNetILS = confirmed.reduce((s,d) => s + d.netILS, 0); // V3.1 — סכום בשער ההיסטורי של כל חלוקה
     const estimatesCount = enriched.length - confirmed.length;
     const estimatesNetUSD = enriched.filter(d => d.isEstimate).reduce((s,d) => s + d.netUSD, 0);
     const monthsElapsed = Math.max(1,
@@ -2993,6 +3001,7 @@ function useLiveMarket() {
   // V3.0 — שכבת אמינות: תאריך הסריקה (לבאנר staleness) + אזהרות הסקנר (להצפה ב-UI)
   const [scanDate, setScanDate]         = useState(null);
   const [scanWarnings, setScanWarnings] = useState([]);
+  const [funds, setFunds]               = useState({}); // V3.1 — market_data/latest.funds (קרן כספית ממאיה)
   const yahooFreshUntilRef = useRef(0);
 
   // ── מיפוי מ-market_data/latest ל-mapping של LIVE_TRACKS ──
@@ -3043,6 +3052,7 @@ function useLiveMarket() {
       // V3.0 — שכבת אמינות
       if (md.date) setScanDate(md.date);
       setScanWarnings(Array.isArray(md.warnings) ? md.warnings : []);
+      if (md.funds) setFunds(md.funds);
     });
     return () => { try { unsub?.(); } catch {} };
   }, [fromFirestore]);
@@ -3085,7 +3095,7 @@ function useLiveMarket() {
     }
   }, [ghTrigger]);
 
-  return { prices, fetchedAt, fetching: ghTrigger !== "idle", ghTrigger, source, refresh: triggerOnDemandScan, scanDate, scanWarnings };
+  return { prices, fetchedAt, fetching: ghTrigger !== "idle", ghTrigger, source, refresh: triggerOnDemandScan, scanDate, scanWarnings, funds };
 }
 
 /**
@@ -4608,7 +4618,7 @@ export default function HaMatzpanGemelnet() {
   const suppressSaveToastRef = useRef(false);
 
   // V2.1.9 — Live Market Prices hook (IBIT, MSTY, SP500, Nasdaq, FX)
-  const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, ghTrigger: marketGhTrigger, refresh: refreshMarket, scanDate, scanWarnings } = useLiveMarket();
+  const { prices: liveMarket, fetchedAt: marketFetchedAt, fetching: marketFetching, ghTrigger: marketGhTrigger, refresh: refreshMarket, scanDate, scanWarnings, funds: liveFunds } = useLiveMarket();
   // V3.0 — שכבת אמינות: dead-man's switch עצמאי מ-GitHub Actions (מבוסס תאריך הנתונים בפועל)
   const scanStaleness = useMemo(() => computeScanStaleness(scanDate), [scanDate]);
   // V3.0 — תשואות גמל-נט (לאומדן יתרה בין דוחות PDF)
@@ -5108,8 +5118,8 @@ export default function HaMatzpanGemelnet() {
 
   // V3.1 — netWorth.js: אומדן מגולגל לקופות (הפקדות + דמי ניהול), MSTY בשווי שוק, אחרת יתרת דוח
   const totals = useMemo(
-    () => computeTotals(assets, loans, { mstyPrice, fx: mstyFX, fundReturnsByTrack }),
-    [assets, loans, mstyPrice, mstyFX, fundReturnsByTrack]
+    () => computeTotals(assets, loans, { mstyPrice, fx: mstyFX, fundReturnsByTrack, fundPrices: liveFunds }),
+    [assets, loans, mstyPrice, mstyFX, fundReturnsByTrack, liveFunds]
   );
 
   const handleFileUpload = async (e) => {
@@ -5505,7 +5515,7 @@ export default function HaMatzpanGemelnet() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {list.map(a => (
                       <div key={a.id}>
-                        <AssetRow a={a} onSpotCheck={setSpotAsset} fundReturns={fundReturnsByTrack[a.trackCode]}/>
+                        <AssetRow a={a} onSpotCheck={setSpotAsset} fundReturns={fundReturnsByTrack[a.trackCode]} fundPrice={liveFunds?.[a.trackCode]}/>
                         {isKid && <CompoundProjection asset={a}/>}
                       </div>
                     ))}
@@ -5529,6 +5539,7 @@ export default function HaMatzpanGemelnet() {
       {tab === "msty"        && <MSTYTab
                                   msty={assets.find(a => a.isMSTY)}
                                   dividends={mstyDividends}
+                                  fxByDate={serverDividends?.fxByDate}
                                   setDividends={setMstyDividends}
                                   fx={mstyFX}
                                   setFx={setMstyFX}

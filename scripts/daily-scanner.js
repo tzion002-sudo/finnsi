@@ -205,6 +205,49 @@ async function tasePriceILS(shareId, yahooTicker) {
   return { price: null, changePct: null, source: "unavailable", isFallback: false };
 }
 
+// ── V3.1 — קרן נאמנות (קרן כספית) ממאיה — מחיר יחידה יומי באגורות ─────────
+// api.tase.co.il/fund חסום (Incapsula); maya.tase.co.il פתוח. ההיסטוריה בדפים של 30 ימי מסחר
+// (POST period=3, pageNumber), מהחדש לישן. מחזיר גם את המחיר ביום הדוח — כך
+// יתרה = reportBalance × מחיר היום / מחיר ביום הדוח, בלי להזין מספר יחידות.
+async function mayaFund(fundId, reportDate) {
+  const url = `https://maya.tase.co.il/api/v1/funds/mutual/${fundId}/history`;
+  const headers = { "User-Agent": "Mozilla/5.0" };
+  let latest = null, atReport = null;
+  for (let page = 1; page <= 15 && !atReport; page++) {
+    const { status, body } = await httpsRequest(url, { method: "POST", headers, timeout: 15000 }, { period: 3, pageNumber: page });
+    if (status !== 200 || !Array.isArray(body) || body.length === 0) break;
+    latest ??= body[0];
+    if (!reportDate) break;
+    atReport = body.find(r => r.tradeDate.slice(0, 10) <= reportDate) || null;
+  }
+  if (!latest?.purchasePrice) return null;
+  return {
+    price:         +(latest.purchasePrice / 100).toFixed(4), // אגורות → ₪
+    asOf:          latest.tradeDate.slice(0, 10),
+    priceAtReport: atReport ? +(atReport.purchasePrice / 100).toFixed(4) : null,
+    reportDate:    atReport ? reportDate : null,
+    mgmtFee:       latest.managmentFee ?? null,
+  };
+}
+
+// ── V3.1 — בנק ישראל: שער יציג דולר (SDMX, CSV) לטווח תאריכים ──────────────
+// מחזיר { "YYYY-MM-DD": rate } — ימי מסחר בלבד (אין שער בסופ"ש/חג)
+async function boiUsdRates(startDate, endDate) {
+  const url = `https://edge.boi.org.il/FusionEdgeServer/sdmx/v2/data/dataflow/BOI.STATISTICS/EXR/1.0/RER_USD_ILS?startperiod=${startDate}&endperiod=${endDate}&format=csv`;
+  const { status, body } = await httpsRequest(url, { timeout: 20000, headers: { "User-Agent": "Mozilla/5.0" } });
+  if (status !== 200 || typeof body !== "string") throw new Error(`HTTP ${status}`);
+  const lines = body.trim().split("\n");
+  const cols = lines[0].split(",");
+  const iDate = cols.indexOf("TIME_PERIOD"), iVal = cols.indexOf("OBS_VALUE");
+  const rates = {};
+  for (const line of lines.slice(1)) {
+    const c = line.split(",");
+    const v = parseFloat(c[iVal]);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(c[iDate]) && v > 2 && v < 6) rates[c[iDate]] = v; // סבירות
+  }
+  return rates;
+}
+
 // ── Yahoo Finance — price fetch ───────────────────────────────
 /** V2.5.2: regularMarketPrice → postMarketPrice → preMarketPrice
  *  fallbackTicker: נסה כשהראשי נכשל */
@@ -734,7 +777,7 @@ async function fetchExcellenceHistory(realPrices) {
     const cutoffYm = (() => { const d = new Date(now); d.setMonth(d.getMonth() - 13); return d.getFullYear() * 100 + (d.getMonth() + 1); })();
     const byTrack = {}, meta = {};
     let totalRows = 0, rejected = 0;
-    const addRow = (trackCode, period, pct, totalAssets) => {
+    const addRow = (trackCode, period, pct, totalAssets, mgmtFee = NaN) => {
       period = String(period);
       if (!trackCode || !/^\d{6}$/.test(period) || Number(period) < cutoffYm) return;
       if (!Number.isFinite(pct)) return; // תשואה ריקה (קרן חדשה בחודש הקמה) — לא שגיאה
@@ -743,7 +786,7 @@ async function fetchExcellenceHistory(realPrices) {
       const ym = `${period.slice(0, 4)}-${period.slice(4, 6)}`;
       const arr = (byTrack[trackCode] ??= []);
       if (!arr.some(r => r.ym === ym)) arr.push({ ym, pct });
-      if (Number.isFinite(totalAssets) && ym >= (meta[trackCode]?.ym || "")) meta[trackCode] = { ym, totalAssets };
+      if (Number.isFinite(totalAssets) && ym >= (meta[trackCode]?.ym || "")) meta[trackCode] = { ym, totalAssets, mgmtFee: Number.isFinite(mgmtFee) ? mgmtFee : null };
     };
 
     for (const src of SOURCES) {
@@ -755,7 +798,7 @@ async function fetchExcellenceHistory(realPrices) {
         const { status, body } = await httpsRequest(`https://data.gov.il/api/3/action/datastore_search?${qs}`, { timeout: 20000 });
         const recs = body?.result?.records;
         if (status !== 200 || !Array.isArray(recs)) throw new Error(`HTTP ${status}`);
-        recs.forEach(r => addRow(Number(r.FUND_ID), r.REPORT_PERIOD, parseFloat(r.MONTHLY_YIELD), parseFloat(r.TOTAL_ASSETS)));
+        recs.forEach(r => addRow(Number(r.FUND_ID), r.REPORT_PERIOD, parseFloat(r.MONTHLY_YIELD), parseFloat(r.TOTAL_ASSETS), parseFloat(r.AVG_ANNUAL_MANAGEMENT_FEE)));
       } catch (e) {
         warnings.push(`${src.name} (data.gov.il): ${e.message}`);
       }
@@ -788,6 +831,7 @@ async function fetchExcellenceHistory(realPrices) {
         trackCode: Number(trackCode), monthly, source: src?.name || "gemelnet", updatedAt: NOW_ISO,
         latestYm: monthly[monthly.length - 1].ym,
         totalAssetsMln: meta[trackCode]?.totalAssets ?? null, // מיליוני ₪, AUM של המסלול
+        mgmtFeePct:     meta[trackCode]?.mgmtFee ?? null,     // V3.1 — דמי ניהול ממוצעים מצבירה במסלול (%)
       }, `fund_returns/${trackCode}`);
     });
     await Promise.all(writes);
@@ -799,6 +843,32 @@ async function fetchExcellenceHistory(realPrices) {
     console.warn("  ⚠ תשואות חודשיות נכשל:", e.message);
     warnings.push(`תשואות חודשיות: ${e.message}`);
   }
+
+  // ══ שלב 2.7: V3.1 — קרן כספית (מאיה) + שער יציג (בנק ישראל) ══
+  let funds = null, boiRate = null;
+  console.log("\n🏦 V3.1 — קרן כספית 5127790 (מאיה) + שער יציג (בנק ישראל)...");
+  try {
+    const mmfAsset = await fsRead("families/mizrahi/assets", "10");
+    const prevMmf  = (await fsRead("market_data", "latest"))?.funds?.["5127790"];
+    const mmf = await mayaFund(5127790, mmfAsset?.reportDate);
+    if (!mmf) throw new Error("אין נתונים");
+    // סבירות: קרן כספית לא זזה יותר מ-2% ביום
+    if (prevMmf?.price && Math.abs(mmf.price / prevMmf.price - 1) > 0.02) {
+      warnings.push(`קרן כספית 5127790: מחיר ${mmf.price} חורג ביותר מ-2% מהקודם (${prevMmf.price}) — לא נכתב`);
+    } else {
+      funds = { "5127790": mmf };
+      console.log(`  ✅ קרן כספית: ₪${mmf.price} (${mmf.asOf}) · ביום הדוח ${mmf.reportDate}: ${mmf.priceAtReport ?? "לא נמצא"}`);
+    }
+  } catch (e) { warnings.push(`קרן כספית 5127790 (מאיה): ${e.message}`); }
+  try {
+    const rates = await boiUsdRates("2025-05-01", TODAY);
+    const dates = Object.keys(rates).sort();
+    if (!dates.length) throw new Error("אין שערים");
+    boiRate = { rate: rates[dates.at(-1)], date: dates.at(-1) };
+    // היסטוריה לשער ביום כל דיבידנד — שדה נפרד במסמך הדיבידנדים (updateMask לא נוגע ברשימה)
+    await fsWrite("market_data", "msty_dividends", { fxByDate: rates, fxSource: "בנק ישראל (שער יציג)" }, "market_data/msty_dividends (fxByDate)");
+    console.log(`  ✅ שער יציג: ${boiRate.rate} (${boiRate.date}) · ${dates.length} ימים בהיסטוריה`);
+  } catch (e) { warnings.push(`שער יציג (בנק ישראל): ${e.message}`); }
 
   // ══ שלב 3: דיבידנד MSTY (V2.7.0: yieldmaxetfs.com ראשוני, Yahoo fallback) ══
   console.log("\n📅 שולף דיבידנדי MSTY מ-yieldmaxetfs.com (מקור ראשוני)...");
@@ -1029,7 +1099,10 @@ async function fetchExcellenceHistory(realPrices) {
       changePct:      fx.changePct,
       dailyChangePct: dailyChg.fx,
       source:         fx.source,
+      boiRate:        boiRate?.rate ?? null,   // V3.1 — שער יציג בנק ישראל
+      boiRateDate:    boiRate?.date ?? null,
     },
+    funds,                                     // V3.1 — { "5127790": {price, asOf, priceAtReport, reportDate, mgmtFee} }
     news:    allNews,
     warnings,
   };

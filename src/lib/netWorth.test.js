@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { estimateBalance } from "./fundEstimate.js";
-import { assetValue, loanBalance, computeTotals } from "./netWorth.js";
+import { assetValue, loanBalance, computeTotals, fundPriceValue, rateOn } from "./netWorth.js";
 
 // תשואות רשמיות מסלול 456 (data.gov.il, נשלף 20.10.2026)
 const RET_456 = { monthly: [
@@ -45,6 +45,22 @@ describe("assetValue", () => {
   });
 });
 
+describe("fundPriceValue (קרן כספית)", () => {
+  const mmf = { trackCode: 5127790, reportBalance: 85351, reportDate: "2026-04-17" };
+  it("יתרה × מחיר היום / מחיר ביום הדוח (נתוני מאיה אמיתיים)", () => {
+    const fp = { price: 11.9002, priceAtReport: 11.6935, reportDate: "2026-04-17", asOf: "2026-10-19" };
+    const v = assetValue(mmf, { fundPrices: { 5127790: fp } });
+    expect(v.kind).toBe("market");
+    expect(v.value).toBeCloseTo(85351 * 11.9002 / 11.6935, 1); // ≈ 86,860
+    expect(v.asOf).toBe("2026-10-19");
+  });
+  it("עוגן של דוח אחר / חסר → null (חוזר ליתרת הדוח)", () => {
+    expect(fundPriceValue(mmf, { price: 12, priceAtReport: 11, reportDate: "2026-01-01" })).toBeNull();
+    expect(fundPriceValue(mmf, { price: 12, priceAtReport: null, reportDate: "2026-04-17" })).toBeNull();
+    expect(assetValue(mmf, {}).kind).toBe("official");
+  });
+});
+
 describe("loanBalance (שפיצר)", () => {
   it("ערך נוכחי של התשלומים שנותרו", () => {
     // 12 תשלומים של 1000 בריבית 0 → 12,000
@@ -77,5 +93,15 @@ describe("computeTotals", () => {
     expect(t.oldestYm).toBe("2026-06");
     expect(t.netWorth).toBeCloseTo(t.total - 1000, 2);
     expect(t.byOwner["זיו"]).toBeCloseTo(est, 2);
+  });
+});
+
+describe("rateOn (שער יציג לפי תאריך)", () => {
+  const fx = { "2026-10-01": 3.08, "2026-10-02": 3.06, "2026-10-05": 3.059 };
+  it("יום מדויק / סופ\"ש → יום המסחר הקודם / לפני ההיסטוריה → null", () => {
+    expect(rateOn(fx, "2026-10-02")).toBe(3.06);
+    expect(rateOn(fx, "2026-10-04")).toBe(3.06);
+    expect(rateOn(fx, "2026-09-01")).toBeNull();
+    expect(rateOn(null, "2026-10-02")).toBeNull();
   });
 });
